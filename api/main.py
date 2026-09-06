@@ -12,11 +12,13 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncpg
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .stream import Broadcaster
 from .vessels import router as vessels_router
@@ -128,3 +130,8 @@ async def ws_positions(ws: WebSocket) -> None:
     finally:
         bc.unsubscribe(queue)
         log.info("ws client disconnected (%d total)", len(bc.clients))
+
+
+# Mounted last so /vessels, /health, /docs and /ws/positions keep precedence.
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

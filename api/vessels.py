@@ -11,7 +11,7 @@ MMSI_MIN, MMSI_MAX = 100_000_000, 999_999_999
 # DISTINCT ON over the (mmsi, time DESC) unique index: Timescale plans this as
 # a SkipScan, measured at 23 ms for the last page of ~7,500 active vessels.
 ACTIVE_VESSELS = """
-SELECT p.mmsi, v.name, v.ship_type, p.time,
+SELECT p.mmsi, v.name, v.ship_type, v.destination, p.time,
        ST_Y(p.geom) AS lat, ST_X(p.geom) AS lon,
        p.sog, p.cog, p.heading, p.nav_status
 FROM (
