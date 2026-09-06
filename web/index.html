@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sawari — Logistics Intelligence</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app">
+
+      <header class="header">
+        <div class="brand">
+          <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="8" fill="url(#sg2)"/>
+            <defs><linearGradient id="sg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0ea5e9"/><stop offset="100%" stop-color="#0284c7"/></linearGradient></defs>
+            <line x1="16" y1="6" x2="16" y2="26" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+            <path d="M16 8 L24 16 L16 18 Z" fill="rgba(255,255,255,0.9)"/>
+            <line x1="12" y1="18" x2="20" y2="18" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M6 24 Q10 22 14 24 Q18 26 22 24 Q24 23 26 24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <div>
+            <div class="brand-name">SAWARI <span class="brand-arabic">صواري</span></div>
+            <div class="brand-sub">Logistics Intelligence Platform</div>
+          </div>
+        </div>
+        <div class="header-right">
+          <div class="pill" id="live-pill">
+            <div class="pill-dot"></div>
+            <span class="pill-label" id="live-label">CONNECTING</span>
+          </div>
+          <div class="clock" id="clock">--:--:-- UTC</div>
+        </div>
+      </header>
+
+      <main class="main">
+
+        <section class="kpis">
+          <div class="kpi" style="--accent:#0ea5e9">
+            <div class="kpi-label">Active Vessels</div>
+            <div class="kpi-value" id="kpi-active">—</div>
+            <div class="kpi-sub" id="kpi-active-sub">on the map, last 10 min</div>
+          </div>
+          <div class="kpi" style="--accent:#10b981">
+            <div class="kpi-label">Live Messages</div>
+            <div class="kpi-value" id="kpi-rate">—</div>
+            <div class="kpi-sub" id="kpi-rate-sub">per second, last 5 s</div>
+          </div>
+          <div class="kpi" style="--accent:#8b5cf6">
+            <div class="kpi-label">Positions Stored</div>
+            <div class="kpi-value" id="kpi-rows">—</div>
+            <div class="kpi-sub" id="kpi-rows-sub">approximate row count</div>
+          </div>
+          <div class="kpi" style="--accent:#f59e0b">
+            <div class="kpi-label">Last Write</div>
+            <div class="kpi-value" id="kpi-write">—</div>
+            <div class="kpi-sub" id="kpi-write-sub">Waiting for data</div>
+          </div>
+        </section>
+
+        <section class="grid-map">
+          <div class="panel map-panel">
+            <div class="map-caption">North Sea / Channel — live vessel positions</div>
+            <div id="map"></div>
+          </div>
+          <aside class="column">
+            <div class="column-title">Track</div>
+            <div class="panel info-panel" id="track-panel">
+              <div class="info-rows" id="track-rows">
+                <div class="empty small">Click a vessel to load its 24 h track</div>
+              </div>
+            </div>
+          </aside>
+        </section>
+
+        <section class="grid-table">
+          <div class="panel table-panel">
+            <div class="table-head">
+              <div class="table-title">Vessels — latest positions</div>
+              <div class="table-meta" id="table-meta">Waiting...</div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Vessel</th><th>Type</th><th>Destination</th><th>Speed</th><th>Course</th><th>Heading</th><th>Last seen</th>
+                  </tr>
+                </thead>
+                <tbody id="vessel-rows">
+                  <tr><td colspan="7" class="empty">Waiting for positions...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <aside class="column">
+            <div class="panel info-panel">
+              <div class="info-title">Connection</div>
+              <div class="info-rows">
+                <div class="info-row"><span>API</span><span id="conn-api" class="warn">Checking...</span></div>
+                <div class="info-row"><span>WebSocket</span><span id="conn-ws" class="warn">Connecting...</span></div>
+                <div class="info-row"><span>Stream</span><span id="conn-stream">—</span></div>
+                <div class="info-row"><span>Server drops</span><span id="conn-drops">—</span></div>
+                <div class="info-row"><span>Provider</span><span>AISStream</span></div>
+              </div>
+            </div>
+          </aside>
+        </section>
+
+      </main>
+
+      <div class="drawer" id="drawer" hidden>
+        <div>
+          <div class="drawer-name" id="drawer-name">—</div>
+          <div class="drawer-id" id="drawer-id">—</div>
+        </div>
+        <div><div class="stat-label">Speed</div><div class="stat-value" id="d-speed">—</div></div>
+        <div><div class="stat-label">Course</div><div class="stat-value" id="d-course">—</div></div>
+        <div><div class="stat-label">Heading</div><div class="stat-value" id="d-heading">—</div></div>
+        <div><div class="stat-label">Position</div><div class="stat-value" id="d-position">—</div></div>
+        <div><div class="stat-label">Last seen</div><div class="stat-value" id="d-seen">—</div></div>
+        <button class="drawer-close" id="drawer-close" type="button">✕ Close</button>
+      </div>
+
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
