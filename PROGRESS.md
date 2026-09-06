@@ -689,6 +689,52 @@ Dataset time span for reference against `hour_utc`: `arrival_at` from
 
 Nothing was written to `model_registry` (still 1 row) or `ml/artifacts/`.
 
+## 2026-09-06 — v1 dashboard ported to plain HTML/JS, served by the API
+
+Source: v1's `sawari-frontend/src/Dashboard.jsx` (React, inline styles,
+SVG schematic map of the Arabian Sea, demo data fallback) at
+`/mnt/c/Users/mox99/Downloads/sawari/sawari/`. Port: `web/index.html`,
+`web/style.css`, `web/app.js` — no build step, no framework, Leaflet
+1.9.4 from cdnjs, CARTO dark tiles. Served by the api container via
+Starlette `StaticFiles` mounted at `/` after the routes; `web/` copied
+into the api image. One API addition: `destination` in `/vessels` so
+v1's Destination column survives. Ingest untouched (`CREATED` still
+2026-09-05 22:37:15 -0700).
+
+Backpressure: socket frames go into a per-vessel map (last write wins)
+and one `requestAnimationFrame` loop applies them with `setLatLng` on
+canvas circle markers. The backlog is bounded by vessel count, not by
+message rate; received/applied/coalesced are shown in the Connection
+panel. Markers unseen for 10 min are pruned, matching
+`/vessels?minutes=10`.
+
+What could be measured here (no browser on this machine):
+
+```
+for p in / /app.js /style.css "/vessels?minutes=10&limit=1" /health /docs /nope.html; do
+  curl -s -o /dev/null -w "$p -> %{http_code} %{content_type} %{time_total}s\n" "http://localhost:8000$p"; done
+```
+
+| path | HTTP | content type | time |
+|---|---|---|---|
+| `/` | 200 | text/html | 0.014 s |
+| `/app.js` | 200 | text/javascript | 0.001 s |
+| `/style.css` | 200 | text/css | 0.001 s |
+| `/vessels?minutes=10&limit=1` | 200 | application/json | 0.008 s |
+| `/health` | 200 | application/json | 0.007 s |
+| `/docs` | 200 | text/html | 0.001 s |
+| `/nope.html` | 404 | — | 0.001 s |
+
+Routes keep precedence over the static mount. WebSocket bridge after
+the rebuild: 51.9 frames/s over 5 s via the smoke client, clean close.
+
+**Not measured: the page itself.** This machine has no `node` and no
+browser, so `app.js` was not executed, syntax-checked, or rendered. The
+browser checks — markers moving in place, LIVE → RECONNECTING → LIVE
+across an api restart, click → track + drawer, frames/s vs applied/s in
+the Connection panel — are open until someone opens
+`http://localhost:8000/`.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
