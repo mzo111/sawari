@@ -98,25 +98,19 @@ CREATE TABLE IF NOT EXISTS model_registry (
 );
 
 -- ------------------------------------------------------------- port seeds
+-- Coordinates are approximate (~0.05 deg) and unverified against UN/LOCODE.
+-- berth_radius_m is 3 km, so check each before trusting port_calls.
 INSERT INTO ports (unlocode, name, country, geom) VALUES
-    ('OMSOH', 'Sohar',            'Oman', ST_SetSRID(ST_MakePoint(56.6100, 24.5100), 4326)),
-    ('OMMCT', 'Muscat (Sultan Qaboos)', 'Oman', ST_SetSRID(ST_MakePoint(58.5650, 23.6250), 4326)),
-    ('OMSLL', 'Salalah',          'Oman', ST_SetSRID(ST_MakePoint(54.0050, 16.9350), 4326)),
-    ('OMDQM', 'Duqm',             'Oman', ST_SetSRID(ST_MakePoint(57.6900, 19.6700), 4326)),
-    ('AEJEA', 'Jebel Ali',        'UAE',  ST_SetSRID(ST_MakePoint(55.0270, 24.9850), 4326)),
-    ('AEAUH', 'Khalifa Port',     'UAE',  ST_SetSRID(ST_MakePoint(54.6500, 24.8100), 4326)),
-    ('AEFJR', 'Fujairah',         'UAE',  ST_SetSRID(ST_MakePoint(56.3600, 25.1600), 4326)),
-    ('AESHJ', 'Sharjah',          'UAE',  ST_SetSRID(ST_MakePoint(55.3700, 25.3600), 4326)),
-    ('QAHMD', 'Hamad Port',       'Qatar',ST_SetSRID(ST_MakePoint(51.5900, 25.0100), 4326)),
-    ('BHKBS', 'Khalifa Bin Salman','Bahrain', ST_SetSRID(ST_MakePoint(50.6500, 26.2000), 4326)),
-    ('KWSAA', 'Shuaiba',          'Kuwait', ST_SetSRID(ST_MakePoint(48.1500, 29.0400), 4326)),
-    ('KWSWK', 'Shuwaikh',         'Kuwait', ST_SetSRID(ST_MakePoint(47.9300, 29.3500), 4326)),
-    ('SADMM', 'Dammam',           'Saudi Arabia', ST_SetSRID(ST_MakePoint(50.1800, 26.5000), 4326)),
-    ('SAJUB', 'Jubail',           'Saudi Arabia', ST_SetSRID(ST_MakePoint(49.6600, 27.0100), 4326)),
-    ('SARTA', 'Ras Tanura',       'Saudi Arabia', ST_SetSRID(ST_MakePoint(50.1600, 26.6400), 4326)),
-    ('IRBND', 'Bandar Abbas',     'Iran', ST_SetSRID(ST_MakePoint(56.2100, 27.1300), 4326)),
-    ('IRBKM', 'Bandar Khomeini',  'Iran', ST_SetSRID(ST_MakePoint(49.0800, 30.4200), 4326)),
-    ('IQUQR', 'Umm Qasr',         'Iraq', ST_SetSRID(ST_MakePoint(47.9400, 30.0400), 4326)),
-    ('PKKAR', 'Karachi',          'Pakistan', ST_SetSRID(ST_MakePoint(66.9800, 24.8100), 4326)),
-    ('INMUN', 'Mundra',           'India', ST_SetSRID(ST_MakePoint(69.7200, 22.7400), 4326))
+    ('NLRTM', 'Rotterdam',        'Netherlands',    ST_SetSRID(ST_MakePoint( 4.0500, 51.9500), 4326)),
+    ('BEANR', 'Antwerp',          'Belgium',        ST_SetSRID(ST_MakePoint( 4.4000, 51.2300), 4326)),
+    ('DEHAM', 'Hamburg',          'Germany',        ST_SetSRID(ST_MakePoint( 9.9700, 53.5400), 4326)),
+    ('DEBRV', 'Bremerhaven',      'Germany',        ST_SetSRID(ST_MakePoint( 8.5700, 53.5500), 4326)),
+    ('BEZEE', 'Zeebrugge',        'Belgium',        ST_SetSRID(ST_MakePoint( 3.2000, 51.3300), 4326)),
+    ('NLAMS', 'Amsterdam',        'Netherlands',    ST_SetSRID(ST_MakePoint( 4.8000, 52.4000), 4326)),
+    ('GBFXT', 'Felixstowe',       'United Kingdom', ST_SetSRID(ST_MakePoint( 1.3300, 51.9500), 4326)),
+    ('DEWVN', 'Wilhelmshaven',    'Germany',        ST_SetSRID(ST_MakePoint( 8.1300, 53.5200), 4326)),
+    ('FRDKK', 'Dunkirk',          'France',         ST_SetSRID(ST_MakePoint( 2.3500, 51.0500), 4326)),
+    ('FRLEH', 'Le Havre',         'France',         ST_SetSRID(ST_MakePoint( 0.1500, 49.4800), 4326)),
+    ('GBSOU', 'Southampton',      'United Kingdom', ST_SetSRID(ST_MakePoint(-1.4000, 50.9000), 4326)),
+    ('NLVLI', 'Vlissingen',       'Netherlands',    ST_SetSRID(ST_MakePoint( 3.6000, 51.4500), 4326))
 ON CONFLICT (unlocode) DO NOTHING;

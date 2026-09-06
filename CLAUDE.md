@@ -1,6 +1,6 @@
 # Sawari v2 — working agreement
 
-Real-time vessel tracking and ETA prediction for Gulf ports. This is a portfolio
+Real-time vessel tracking and ETA prediction for North Sea / Channel ports. This is a portfolio
 project with a job-search deadline, not a startup. Optimize for a service that is
 provably live, tested, and measured by **Sep 21, 2026** — not for feature count.
 
@@ -24,8 +24,9 @@ PostgreSQL 16 with TimescaleDB + PostGIS (`timescale/timescaledb-ha:pg16`) ·
 Redis 7 · XGBoost · pytest + ruff · Docker Compose · GitHub Actions ·
 Hetzner CX22 VPS with Caddy for TLS.
 
-Data source: AISStream.io websocket feed. Bounding boxes: Arabian Gulf /
-Hormuz / Gulf of Oman, plus a Salalah–Duqm box. Recorded in `DESIGN.md`.
+Data source: AISStream.io websocket feed. Bounding box: southern North Sea +
+eastern Channel (49–56°N, 2.5°W–10°E). Chosen from measured AISStream density —
+the Gulf has zero coverage; see `PROGRESS.md` 2026-09-06. Recorded in `DESIGN.md`.
 
 ## Anti-goals — do NOT build these
 

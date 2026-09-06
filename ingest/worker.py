@@ -41,14 +41,17 @@ DATABASE_URL = os.environ.get(
 )
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
-# Arabian Gulf + Strait of Hormuz + Gulf of Oman, and the Salalah approaches.
+# Southern North Sea + eastern Channel: Southampton/Le Havre through the
+# Dover Strait, the Belgian/Dutch coast, and the German Bight to Hamburg.
 # Format is [[lat_min, lon_min], [lat_max, lon_max]]. Recorded in DESIGN.md.
+# Chosen from measured AISStream density (PROGRESS.md 2026-09-06): the Gulf
+# had zero coverage; two 2-degree cells in this box held 4,600 distinct
+# vessels in ten minutes.
 # Overridable via AIS_BOUNDING_BOXES (JSON, same format) so we can point the
 # worker at a different box - e.g. worldwide for diagnosis - without a code
 # change or rebuild-from-source edit.
 _DEFAULT_BOUNDING_BOXES = [
-    [[22.0, 47.0], [30.5, 60.5]],   # Gulf, Hormuz, Sohar/Muscat
-    [[15.5, 52.0], [19.5, 56.5]],   # Salalah / Duqm approaches
+    [[49.0, -2.5], [56.0, 10.0]],
 ]
 BOUNDING_BOXES = (
     json.loads(os.environ["AIS_BOUNDING_BOXES"])
