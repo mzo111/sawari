@@ -40,6 +40,7 @@ services:
     environment:
       DATABASE_URL: postgresql://sawari:${POSTGRES_PASSWORD:-sawari}@db:5432/sawari
       REDIS_URL: redis://redis:6379/0
+      AIS_BOUNDING_BOXES: ${AIS_BOUNDING_BOXES:-}
     depends_on:
       db:
         condition: service_healthy

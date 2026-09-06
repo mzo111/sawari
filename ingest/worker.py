@@ -43,14 +43,30 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 # Arabian Gulf + Strait of Hormuz + Gulf of Oman, and the Salalah approaches.
 # Format is [[lat_min, lon_min], [lat_max, lon_max]]. Recorded in DESIGN.md.
-BOUNDING_BOXES = [
+# Overridable via AIS_BOUNDING_BOXES (JSON, same format) so we can point the
+# worker at a different box - e.g. worldwide for diagnosis - without a code
+# change or rebuild-from-source edit.
+_DEFAULT_BOUNDING_BOXES = [
     [[22.0, 47.0], [30.5, 60.5]],   # Gulf, Hormuz, Sohar/Muscat
     [[15.5, 52.0], [19.5, 56.5]],   # Salalah / Duqm approaches
 ]
+BOUNDING_BOXES = (
+    json.loads(os.environ["AIS_BOUNDING_BOXES"])
+    if os.environ.get("AIS_BOUNDING_BOXES")
+    else _DEFAULT_BOUNDING_BOXES
+)
 
 BATCH_MAX_ROWS = 500
 BATCH_MAX_SECONDS = 2.0
 HEARTBEAT_SECONDS = 60
+LOG_PAYLOAD_LIMIT = 200
+
+
+def _truncate(raw: str | bytes) -> str:
+    """Cap a raw message before it hits the log — a server error response
+    could echo our subscription payload (and the API key in it) back to us."""
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    return text if len(text) <= LOG_PAYLOAD_LIMIT else text[:LOG_PAYLOAD_LIMIT] + "...(truncated)"
 
 INSERT_POSITION = """
 INSERT INTO positions (time, mmsi, geom, sog, cog, heading, nav_status)
@@ -130,8 +146,11 @@ class Ingestor:
 
         while not self.stopping.is_set():
             try:
+                # ping_timeout well above ping_interval: at ~150 frames/s the
+                # pong queues behind data frames, and a 20s timeout tore the
+                # connection down about once every 5 minutes.
                 async with websockets.connect(
-                    AISSTREAM_URL, ping_interval=20, ping_timeout=20, max_queue=2048
+                    AISSTREAM_URL, ping_interval=20, ping_timeout=60, max_queue=2048
                 ) as ws:
                     await ws.send(json.dumps({
                         "APIKey": API_KEY,
@@ -169,6 +188,14 @@ class Ingestor:
 
         kind = msg.get("MessageType")
 
+        if kind is None:
+            # AISStream's data messages always carry MessageType; an object
+            # without one is the server telling us something is wrong (bad
+            # key, bad subscription, etc.), not a data message to shrug off.
+            self.stats.drops["no_message_type"] += 1
+            log.error("aisstream reply has no MessageType (server error?): %s", _truncate(raw))
+            return
+
         if kind == "ShipStaticData":
             static = parse_static(msg)
             if static and self.pool:
@@ -181,6 +208,10 @@ class Ingestor:
             return
 
         if kind != "PositionReport":
+            # A known AISStream type we don't process. Not a failure - count
+            # it by name so it's visible in the heartbeat, but don't log
+            # every occurrence at ERROR.
+            self.stats.drops[f"unhandled_{kind}"] += 1
             return
 
         pos, reason = parse_position(msg)
