@@ -47,5 +47,21 @@ services:
       redis:
         condition: service_healthy
 
+  api:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://sawari:${POSTGRES_PASSWORD:-sawari}@db:5432/sawari
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:
