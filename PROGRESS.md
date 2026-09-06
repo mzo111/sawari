@@ -353,6 +353,76 @@ SELECT count(*), count(*) FILTER (WHERE km/NULLIF(hours,0) > 60),
        count(*) FILTER (WHERE km/NULLIF(hours,0) > 150), round(max(km/NULLIF(hours,0))::numeric) FROM jump;"
 ```
 
+## 2026-09-06 — plausibility gate on port-call observations
+
+`ml/portcalls_job.py` now computes implied speed between each fix and its
+neighbours (`lag`/`lead` per MMSI, in the observation query) and
+`ml/portcalls.plausible()` drops any fix whose jump to **either** neighbour
+exceeds `MAX_KMH = 60`. `positions` is untouched; the parser and worker are
+untouched; this filters at label time only. 9 new tests, 60 total.
+
+Both-sides semantics, deliberately: under a shared MMSI every fix has an
+implausible neighbour, so the whole track contributes no labels. A running
+filter against the last accepted fix would keep whichever transponder
+reported first — a confident label for a vessel we can't identify.
+
+### Before / after, same 180-minute window, `port_calls` truncated between runs
+
+Before = the previous image; after = rebuilt with the gate. 68 s apart.
+
+```
+docker compose stop portcalls
+docker compose exec -T db psql -U sawari -d sawari -c "TRUNCATE port_calls;"
+docker compose run --rm -T portcalls python -m ml.portcalls_job --once --since-minutes 180
+# before (07:21:07): window=180m obs=157485 pairs=2728 opened=2779 arrived=796 departed=164 took=0.65s
+docker compose exec -T db psql -U sawari -d sawari -c "TRUNCATE port_calls;"
+docker compose build -q portcalls
+docker compose run --rm -T portcalls python -m ml.portcalls_job --once --since-minutes 180
+# after  (07:22:15): window=180m obs=156601 gated=2257 pairs=2730 opened=2736 arrived=786 departed=122 took=1.27s
+```
+
+| | calls | arrivals | closed | implied >60 km/h | implied >150 km/h | max km/h |
+|---|---|---|---|---|---|---|
+| before | 2,779 | 796 | 164 | 46 | **45 (27.4%)** | 7,291,671 |
+| after | 2,736 | 786 | 122 | 1 | **0** | 60 |
+
+Gated: 2,257 of 158,858 fetched observations (1.4%). Calls −1.5%,
+arrivals −1.3%, closed −25.6% — the removed closures are the collisions.
+Invariant check after: 0 rows. The single residual >60 sits at the
+threshold: the check query (`PROGRESS.md` shared-MMSI section) walks raw
+`positions` from the last in-anchorage fix to the departure fix, so a path
+that crosses a gated fix can show a straight-line speed at the boundary.
+
+Per port, after (the per-port table in the detector section above is from
+the 07:12 run, so it is not a like-for-like "before"):
+
+| port | calls | arrivals | closed |
+|---|---|---|---|
+| Amsterdam | 948 | 113 | 21 |
+| Antwerp | 476 | 93 | 28 |
+| Rotterdam | 415 | 118 | 30 |
+| Hamburg | 331 | 187 | 3 |
+| Vlissingen | 178 | 56 | 13 |
+| Bremerhaven | 105 | 61 | 1 |
+| Le Havre | 64 | 41 | 1 |
+| Wilhelmshaven | 64 | 32 | 8 |
+| Southampton | 60 | 34 | 6 |
+| Zeebrugge | 57 | 31 | 7 |
+| Felixstowe | 30 | 18 | 2 |
+| Dunkirk | 8 | 2 | 2 |
+
+First periodic run after restart (15-minute window):
+`obs=16656 gated=170 pairs=2627 opened=0 arrived=0 departed=0 open_total=2614 stale_open=332 took=0.16s`.
+`stale_open` rose from 317 to 332: an open call whose only fixes in the
+window were gated now counts as stale.
+
+Cost of the gate, measured on a 15-minute window before building it: the
+`lag`/`lead` window pass is 128 ms over 54,510 rows (single WindowAgg,
+5 MB quicksort); it removes 372 fixes (0.68%) touching 119 MMSIs (1.5%),
+2 of them entirely. Threshold consequence: 60 km/h is 32 kn, so
+high-speed craft above that are excluded from labels; the parser's sog
+ceiling is 50 kn.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
