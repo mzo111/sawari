@@ -1,5 +1,10 @@
-import asyncio, json, os, time, websockets
+import asyncio
+import json
+import os
+import time
 from collections import Counter
+
+import websockets
 
 URL = "wss://stream.aisstream.io/v0/stream"
 KEY = os.environ["AISSTREAM_API_KEY"]

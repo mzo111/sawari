@@ -248,15 +248,14 @@ class Ingestor:
         self._last_flush = time.monotonic()
         new_mmsi = {row[1] for row in batch} - self.seen_mmsi
         try:
-            async with self.pool.acquire() as conn:
-                async with conn.transaction():
-                    # FK safety: vessels row must exist before port_calls later on.
-                    if new_mmsi:
-                        await conn.executemany(
-                            UPSERT_VESSEL_SEEN,
-                            [(m, batch[0][0]) for m in new_mmsi],
-                        )
-                    await conn.executemany(INSERT_POSITION, batch)
+            async with self.pool.acquire() as conn, conn.transaction():
+                # FK safety: vessels row must exist before port_calls later on.
+                if new_mmsi:
+                    await conn.executemany(
+                        UPSERT_VESSEL_SEEN,
+                        [(m, batch[0][0]) for m in new_mmsi],
+                    )
+                await conn.executemany(INSERT_POSITION, batch)
             self.stats.written += len(batch)
             self.seen_mmsi |= new_mmsi
         except Exception as exc:  # noqa: BLE001

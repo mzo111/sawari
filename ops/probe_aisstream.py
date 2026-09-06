@@ -1,4 +1,8 @@
-import asyncio, json, os, websockets
+import asyncio
+import json
+import os
+
+import websockets
 
 URL = "wss://stream.aisstream.io/v0/stream"
 BOXES = [[[22.0, 47.0], [30.5, 60.5]]]

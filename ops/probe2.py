@@ -1,4 +1,8 @@
-import asyncio, json, os, websockets
+import asyncio
+import json
+import os
+
+import websockets
 
 URL = "wss://stream.aisstream.io/v0/stream"
 KEY = os.environ["AISSTREAM_API_KEY"]
@@ -26,7 +30,7 @@ async def probe(name, boxes):
                 if n == 1:
                     print(f"  first: {str(m)[:250]}")
             print(f"{name}: {n} messages in 25s")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - diagnostic script, report and move on
         print(f"{name}: ERROR {e}")
 
 async def main():
