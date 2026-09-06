@@ -423,6 +423,90 @@ Cost of the gate, measured on a 15-minute window before building it: the
 high-speed craft above that are excluded from labels; the parser's sog
 ceiling is 50 kn.
 
+## 2026-09-06 — naive ETA baseline, temporal holdout
+
+`ml/baseline.py`: `eta_hours = (dist_m / 1852) / max(sog, 1 kn)` — no
+training. Distance is PostGIS `ST_Distance(geography)` to the port point.
+`sog` below 1 kn (or `NULL`) is clamped to 1 kn: below that the reported
+speed is GPS jitter on a ship not making way, so the floor gives a finite,
+pessimistic prediction instead of dividing by noise. `ml/eval.py` builds
+the dataset (in-anchorage fixes strictly before `arrival_at`, on calls
+with an observed approach phase, gated by the same `MAX_KMH = 60` rule the
+detector uses), splits **by call on `arrival_at`** — never by row — and
+reports MAE. 14 tests; 74 in the suite.
+
+```
+.venv/bin/python -m ml.eval
+```
+
+```
+dataset: rows=3165 calls=74 gate=MAX_KMH 60 floor=1 kn holdout_frac=0.2
+temporal cutoff on arrival_at: 2026-09-06T06:59:14.575731+00:00
+```
+
+Of 788 calls with an `arrival_at`, only 74 were observed approaching
+(`approach_at < arrival_at`); the rest were already berthed at first
+sight. Labels are capped by the data span (max ≈ 2 h to arrival).
+
+### Holdout (`arrival_at >= cutoff`): 1,242 rows, 15 calls
+
+| | rows | MAE |
+|---|---|---|
+| all rows | 1,242 | **0.874 h (52.5 min)** |
+| `sog >= 1 kn` only | 963 | 0.443 h (26.6 min) |
+| floored rows (`sog < 1 kn` or NULL) | 279 (22.5%) | — |
+
+| distance band | n | MAE |
+|---|---|---|
+| 0–5 km | 797 | 0.575 h (34.5 min) |
+| 5–10 km | 281 | 0.864 h (51.9 min) |
+| 10–15 km | 164 | 2.344 h (140.7 min) |
+
+| port | rows | calls | MAE |
+|---|---|---|---|
+| Rotterdam | 431 | 6 | 0.891 h (53.5 min) |
+| Amsterdam | 248 | 2 | 1.573 h (94.4 min) |
+| Southampton | 237 | 3 | 0.493 h (29.6 min) |
+| Zeebrugge | 104 | 1 | 0.872 h (52.3 min) |
+| Antwerp | 100 | 1 | 0.751 h (45.0 min) |
+| Hamburg | 69 | 1 | 0.367 h (22.0 min) |
+| Vlissingen | 53 | 1 | 0.074 h (4.5 min) |
+
+### Train side, reference only (`arrival_at < cutoff`): 1,923 rows, 59 calls
+
+The baseline is not fitted, so this is the same predictor on more data —
+it shows whether the holdout is representative, nothing else.
+
+| | rows | MAE |
+|---|---|---|
+| all rows | 1,923 | 0.601 h (36.1 min) |
+| `sog >= 1 kn` only | 1,593 | 0.309 h (18.6 min) |
+| floored rows | 330 (17.2%) | — |
+
+| distance band | n | MAE |
+|---|---|---|
+| 0–5 km | 1,334 | 0.410 h (24.6 min) |
+| 5–10 km | 464 | 1.080 h (64.8 min) |
+| 10–15 km | 125 | 0.862 h (51.7 min) |
+
+| port | rows | calls | MAE |
+|---|---|---|---|
+| Rotterdam | 389 | 8 | 0.849 h (51.0 min) |
+| Hamburg | 326 | 11 | 0.369 h (22.1 min) |
+| Amsterdam | 315 | 6 | 0.478 h (28.7 min) |
+| Le Havre | 269 | 6 | 0.529 h (31.8 min) |
+| Antwerp | 234 | 7 | 0.972 h (58.3 min) |
+| Vlissingen | 129 | 5 | 0.837 h (50.2 min) |
+| Southampton | 92 | 6 | 0.497 h (29.8 min) |
+| Wilhelmshaven | 90 | 3 | 0.113 h (6.8 min) |
+| Bremerhaven | 54 | 3 | 0.316 h (19.0 min) |
+| Zeebrugge | 15 | 1 | 0.125 h (7.5 min) |
+| Felixstowe | 10 | 3 | 0.180 h (10.8 min) |
+
+Per-port holdout figures rest on 1–6 calls each. The number to beat is
+the holdout all-rows MAE, **0.874 h**, on this cutoff; re-run `ml.eval`
+when the model is evaluated so both use the same dataset and split.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
