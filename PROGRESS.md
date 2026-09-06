@@ -234,6 +234,125 @@ Data-quality aside: the first vessel in `/vessels` is MMSI `200000000`
 transponder. Not dropped by the parser — worth a `DropReason` later if it
 skews the model.
 
+## 2026-09-06 — port-call detector first run
+
+`ml/portcalls.py` (pure state machine) + `ml/portcalls_job.py` (periodic
+asyncpg job) added as the `portcalls` compose service. Ingest container not
+touched (`CREATED` still 2026-09-05 22:37:15 -0700). 16 synthetic-track tests;
+51 total in the suite.
+
+### Query plan behind the candidate scan (15-minute window, 54,610 positions)
+
+| plan | node | execution |
+|---|---|---|
+| `ST_DWithin(geography)` only | nested loop, join filter over every row, parallel, cost 3.29M | 357.8 ms |
+| geometry bbox `&& ST_Expand(...)` prefilter, then `ST_DWithin(geography)` | **GIST index scan** on `positions_geom_gist`, cost 8.3k, 16,488 candidates → 2,287 pairs | **89.0 ms** |
+
+```
+docker compose exec -T db psql -U sawari -d sawari -c "EXPLAIN (ANALYZE, TIMING OFF)
+SELECT DISTINCT pos.mmsi, p.id FROM positions pos JOIN ports p
+  ON pos.geom && ST_Expand(p.geom, p.anchorage_radius_m / 111000.0 * 1.7)
+ AND ST_DWithin(p.geom::geography, pos.geom::geography, p.anchorage_radius_m)
+WHERE pos.time > now() - interval '15 minutes';"
+```
+
+Anchorage overlap at the default 15 km: exactly one pair, Bremerhaven–
+Wilhelmshaven, 29.4 km apart against a 30 km combined reach.
+
+### Backfill and idempotency (`--once --since-minutes 180`, 07:12 UTC)
+
+```
+docker compose run --rm -T portcalls python -m ml.portcalls_job --once --since-minutes 180
+# run 1: window=180m obs=146199 pairs=2710 opened=2759 arrived=789 departed=155 open_total=2604 stale_open=0 took=0.60s
+# run 2: window=180m obs=146274 pairs=2710 opened=0    arrived=0   departed=0   open_total=2604 stale_open=0 took=0.55s
+# port_calls count after each: 2759, 2759
+```
+
+Second run over the same window opened nothing — replay is a no-op against
+the live table. First periodic run of the service (15-minute window):
+`obs=16744 pairs=2612 opened=0 arrived=0 departed=1 open_total=2603 stale_open=317 took=0.12s`.
+`stale_open` = open calls whose vessel had no fix in the window; never
+auto-closed.
+
+### Result, per port (all 2,759 calls)
+
+| port | calls | arrivals | open | closed |
+|---|---|---|---|---|
+| Amsterdam | 977 | 116 | 921 | 56 |
+| Antwerp | 470 | 93 | 446 | 24 |
+| Rotterdam | 415 | 116 | 382 | 33 |
+| Hamburg | 330 | 187 | 327 | 3 |
+| Vlissingen | 176 | 55 | 165 | 11 |
+| Bremerhaven | 106 | 62 | 104 | 2 |
+| Le Havre | 64 | 41 | 63 | 1 |
+| Wilhelmshaven | 64 | 32 | 59 | 5 |
+| Southampton | 60 | 33 | 54 | 6 |
+| Zeebrugge | 58 | 33 | 48 | 10 |
+| Felixstowe | 31 | 19 | 28 | 3 |
+| Dunkirk | 8 | 2 | 6 | 2 |
+
+Invariant check (`arrival_at < approach_at OR departure_at < approach_at OR
+departure_at < arrival_at`): **0 rows**. Calls per (mmsi, port): 2,664 pairs
+with 1, 44 with 2, one each with 3 and 4 — flapping/re-entry is 1.7% of
+pairs over three hours.
+
+```
+docker compose exec -T db psql -U sawari -d sawari -c "
+SELECT p.name, count(*) AS calls, count(*) FILTER (WHERE c.arrival_at IS NOT NULL) AS arrivals,
+       count(*) FILTER (WHERE c.departure_at IS NULL) AS open, count(*) FILTER (WHERE c.departure_at IS NOT NULL) AS closed
+FROM port_calls c JOIN ports p ON p.id = c.port_id GROUP BY p.name ORDER BY calls DESC;"
+```
+
+### Finding: shared MMSIs corrupt departures
+
+Two of five sampled arrivals had physically impossible departures. Tracing
+one — MMSI `249600000` at Zeebrugge:
+
+```
+            time               |  lon   |   lat   | sog  | km_from_prev | min_from_prev
+ 2026-09-06 06:05:10 | 3.2128 | 51.3422 |  0.1 |              |
+ 2026-09-06 06:07:28 | 0.9359 | 51.4836 | 15.5 |        159.2 |  2.3
+ 2026-09-06 06:11:11 | 3.2128 | 51.3422 |  0.1 |        159.2 |  3.7
+```
+
+One transponder is berthed at Zeebrugge, another is underway in the Channel,
+both transmitting as `249600000`. The detector followed the interleaved
+track exactly as the rules say: departure at 06:07, re-entry at 06:11.
+
+How common: for every closed call, implied speed from the last fix inside
+the anchorage to the departure fix —
+
+| closed calls | implied > 60 km/h | implied > 150 km/h | max |
+|---|---|---|---|
+| 156 | 45 | **44 (28%)** | 7,291,671 km/h |
+
+So roughly a quarter of `departure_at` values in this first run are MMSI
+collisions, not vessels leaving, and every dwell time built on them is
+wrong. `arrival_at` can be affected the same way (the other ship's fix
+lands in the berth circle). Not fixed here — a per-vessel plausibility gate
+(max km/h between consecutive fixes) is a rule change, and belongs with the
+radii decision. The parser's `IMPOSSIBLE_SPEED` drop only checks reported
+`sog`, not distance between fixes, so it does not catch this.
+
+```
+docker compose exec -T db psql -U sawari -d sawari -c "
+WITH closed AS (
+  SELECT c.id, c.mmsi, c.departure_at, p.geom AS pgeom, p.anchorage_radius_m AS r
+  FROM port_calls c JOIN ports p ON p.id = c.port_id WHERE c.departure_at IS NOT NULL),
+last_inside AS (
+  SELECT cl.id, max(pos.time) AS t_in FROM closed cl
+  JOIN positions pos ON pos.mmsi = cl.mmsi AND pos.time < cl.departure_at
+   AND ST_DWithin(cl.pgeom::geography, pos.geom::geography, cl.r) GROUP BY cl.id),
+jump AS (
+  SELECT ST_Distance(pi.geom::geography, po.geom::geography)/1000.0 AS km,
+         EXTRACT(EPOCH FROM (cl.departure_at - li.t_in))/3600.0 AS hours
+  FROM closed cl JOIN last_inside li ON li.id = cl.id
+  JOIN positions pi ON pi.mmsi = cl.mmsi AND pi.time = li.t_in
+  JOIN positions po ON po.mmsi = cl.mmsi AND po.time = cl.departure_at)
+SELECT count(*), count(*) FILTER (WHERE km/NULLIF(hours,0) > 60),
+       count(*) FILTER (WHERE km/NULLIF(hours,0) > 150), round(max(km/NULLIF(hours,0))::numeric) FROM jump;"
+```
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
