@@ -169,6 +169,71 @@ Port coordinates in `db/schema.sql` are approximate (~0.05°) and unverified
 against UN/LOCODE. `berth_radius_m` is 3 km, so a wrong basin is possible.
 Verify each before trusting `port_calls`. Does not affect ingest.
 
+## 2026-09-06 — API service first run
+
+`api/` (FastAPI + asyncpg pool + Redis subscriber) added as the `api` compose
+service on :8000. Ingest container not rebuilt or restarted (its `CREATED`
+stayed 2026-09-05 22:37:15 -0700 throughout). New pins in `requirements.txt`:
+`fastapi==0.141.1`, `uvicorn==0.52.4`; `websockets` stays `13.1`.
+
+### Request latency (single requests, local Docker, `curl -w %{time_total}`)
+
+| request | HTTP | time |
+|---|---|---|
+| `GET /health` | 200 | 0.008 s |
+| `GET /vessels?minutes=10&limit=100` | 200 | 0.019 s |
+| `GET /vessels?minutes=10&limit=100&offset=7400` (last page of ~7,500 active) | 200 | 0.021 s |
+| `GET /vessels/200000000/track?hours=24` | 200 | 0.002 s |
+| `GET /vessels/999/track` (mmsi out of range) | 422 | 0.001 s |
+| `GET /vessels?minutes=99999` | 422 | 0.001 s |
+| `GET /docs`, `GET /openapi.json` | 200 | < 0.003 s |
+
+```
+B=http://localhost:8000
+for p in /health "/vessels?minutes=10&limit=100" "/vessels?minutes=10&limit=100&offset=7400"; do
+  curl -s -o /dev/null -w "$p -> %{http_code} %{time_total}s\n" "$B$p"; done
+```
+
+`/health` at 06:48:16 reported `rows_approx=411799` (from
+`approximate_row_count('positions')`, stats-based) and
+`stream.dropped=0`.
+
+Planner evidence behind `/vessels` (`EXPLAIN ANALYZE`, live data): Timescale
+**SkipScan** over the `(mmsi, time DESC)` unique index; 23.3 ms execution at
+`OFFSET 7400`. `/health`'s `max(time)` is an index-only scan on the
+auto-created `_hyper_1_1_chunk_positions_time_idx`, 0.059 ms.
+
+### WebSocket bridge (`/ws/positions`)
+
+Smoke client: connect, assert the first 5 frames carry
+`mmsi, lat, lon, sog, cog, time`, then count frames for 5 s, then close.
+
+| server | frames/s over 5 s | close |
+|---|---|---|
+| container, uvicorn default (`--ws auto` → sansio impl) — **final config** | 58.7 | clean, `INFO` only |
+| container, `--ws websockets` (legacy impl, since removed) | 66.0 | clean |
+| local `.venv` uvicorn :8001, `--ws websockets-sansio` | 61.7 | clean |
+
+All three are the ingest rate (3,882 rows/min ≈ 64.7/s) within the 5 s
+sampling window. `kill -9` of a client mid-stream: no traceback, `clients`
+back to 0, `/health` still 200.
+
+```
+.venv/bin/python <scratchpad>/ws_smoke.py ws://localhost:8000/ws/positions
+docker compose logs api | grep -E "ws client|Traceback"
+```
+
+**Compatibility finding:** uvicorn 0.52.4's default WebSocket implementation
+(`websockets-sansio`) works with `websockets==13.1` — verified by the
+:8001 run above, then by the rebuilt container. The plan had pinned
+`--ws websockets` on the assumption it might not; uvicorn logs a
+deprecation warning for that flag, so it was dropped once measured.
+
+Data-quality aside: the first vessel in `/vessels` is MMSI `200000000`
+(name `null`), which is in range but almost certainly a misconfigured
+transponder. Not dropped by the parser — worth a `DropReason` later if it
+skews the model.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
