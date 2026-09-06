@@ -2,7 +2,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ml.baseline import SOG_FLOOR_KN, eta_hours, is_floored, mae, temporal_split
+from ml.baseline import (
+    SOG_FLOOR_KN,
+    eta_hours,
+    group_split,
+    is_floored,
+    mae,
+    temporal_split,
+)
 from ml.dataset import Row
 
 T0 = datetime(2026, 9, 6, 6, 0, tzinfo=timezone.utc)
@@ -12,12 +19,13 @@ def at(minutes):
     return T0 + timedelta(minutes=minutes)
 
 
-def row(call_id, arrival_minutes, minutes_before=10, port="Rotterdam"):
+def row(call_id, arrival_minutes, minutes_before=10, port="Rotterdam", mmsi=None):
     return Row(
         call_id=call_id, port=port,
         approach_at=at(arrival_minutes - 60),
         arrival_at=at(arrival_minutes), time=at(arrival_minutes - minutes_before),
         dist_m=5000.0, sog=8.0, hours_to_arrival=minutes_before / 60,
+        mmsi=mmsi if mmsi is not None else 244000000 + call_id,
     )
 
 
@@ -100,3 +108,30 @@ def test_input_order_does_not_matter():
 
 def test_empty_input_splits_to_nothing():
     assert temporal_split([], 0.2) == ([], [], None)
+
+
+# ------------------------------------------------------------- group_split
+
+
+def test_group_split_keeps_the_temporal_holdout_exactly():
+    rows = [row(c, arrival_minutes=c * 10) for c in range(1, 6)]
+    _, temporal_holdout, temporal_cutoff = temporal_split(rows, 0.2)
+    _, holdout, cutoff = group_split(rows, 0.2)
+    assert holdout == temporal_holdout
+    assert cutoff == temporal_cutoff
+
+
+def test_group_split_purges_holdout_vessels_from_training():
+    shared = 244999999
+    rows = [row(1, 10, mmsi=shared), row(2, 20), row(3, 30), row(4, 40), row(5, 50, mmsi=shared)]
+    train, holdout, _ = group_split(rows, 0.2)
+    assert {r.call_id for r in holdout} == {5}
+    assert {r.call_id for r in train} == {2, 3, 4}
+
+
+def test_group_split_leaves_no_vessel_on_both_sides():
+    rows = [row(c, arrival_minutes=c * 10, mmsi=244000000 + (c % 5)) for c in range(1, 10)]
+    train, holdout, _ = group_split(rows, 0.3)
+    assert {r.call_id for r in holdout} == {7, 8, 9}
+    assert {r.call_id for r in train} == {1, 5, 6}
+    assert not ({r.mmsi for r in train} & {r.mmsi for r in holdout})

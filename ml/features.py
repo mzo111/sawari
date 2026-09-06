@@ -23,6 +23,10 @@ FEATURES = [
     "minutes_in_anchorage",
 ]
 
+# Vessel-static attributes. With one call per vessel they uniquely index
+# training calls, which is what the leakage diagnostics switch off.
+VESSEL_ATTRS = ["ship_type", "length_m", "width_m", "draught_m"]
+
 NAN = float("nan")
 
 

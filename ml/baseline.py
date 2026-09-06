@@ -53,3 +53,14 @@ def temporal_split(
     train = [r for r in rows if r.arrival_at < cutoff]
     holdout = [r for r in rows if r.arrival_at >= cutoff]
     return train, holdout, cutoff
+
+
+def group_split(
+    rows: list[Row], holdout_frac: float = 0.2
+) -> tuple[list[Row], list[Row], datetime | None]:
+    """temporal_split, then purge from training every vessel that appears in
+    the holdout. The holdout is unchanged, so the only thing that moves is
+    what the model was allowed to see - that isolates vessel leakage."""
+    train, holdout, cutoff = temporal_split(rows, holdout_frac)
+    holdout_mmsi = {r.mmsi for r in holdout}
+    return [r for r in train if r.mmsi not in holdout_mmsi], holdout, cutoff

@@ -32,6 +32,7 @@ class Row:
     length_m: float | None = None
     width_m: float | None = None
     draught_m: float | None = None
+    mmsi: int | None = None  # for splits and overlap counts, never a feature
 
 
 # The lag/lead gate mirrors ml.portcalls.plausible() so feature rows are the
@@ -57,7 +58,7 @@ WITH labelled AS (
       AND time >= (SELECT min(approach_at) FROM labelled)
     WINDOW w AS (PARTITION BY mmsi ORDER BY time)
 )
-SELECT l.call_id, l.port, l.approach_at, l.arrival_at, f.time, f.sog, f.cog,
+SELECT l.call_id, l.mmsi, l.port, l.approach_at, l.arrival_at, f.time, f.sog, f.cog,
        ST_Distance(l.pgeom::geography, f.geom::geography) AS dist_m,
        degrees(ST_Azimuth(f.geom::geography, l.pgeom::geography)) AS bearing_deg,
        l.ship_type, l.length_m, l.width_m, l.draught_m,
@@ -79,6 +80,7 @@ async def load_rows(conn: asyncpg.Connection) -> list[Row]:
             dist_m=r["dist_m"], sog=r["sog"], hours_to_arrival=r["hours_to_arrival"],
             cog=r["cog"], bearing_deg=r["bearing_deg"], ship_type=r["ship_type"],
             length_m=r["length_m"], width_m=r["width_m"], draught_m=r["draught_m"],
+            mmsi=r["mmsi"],
         )
         for r in records
     ]

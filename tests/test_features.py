@@ -6,6 +6,7 @@ import pytest
 from ml.dataset import Row
 from ml.features import (
     FEATURES,
+    VESSEL_ATTRS,
     featurize,
     hour_utc,
     minutes_in_anchorage,
@@ -100,3 +101,9 @@ def test_minutes_in_anchorage_counts_from_approach():
     assert minutes_in_anchorage(make_row()) == pytest.approx(45.0)
     named = dict(zip(FEATURES, featurize(make_row()), strict=True))
     assert named["minutes_in_anchorage"] == pytest.approx(45.0)
+
+
+def test_dropping_vessel_attrs_leaves_the_dynamic_features_in_order():
+    assert set(VESSEL_ATTRS) <= set(FEATURES)
+    kept = [f for f in FEATURES if f not in VESSEL_ATTRS]
+    assert kept == ["dist_m", "sog", "cog", "bearing_minus_cog", "hour_utc", "minutes_in_anchorage"]
