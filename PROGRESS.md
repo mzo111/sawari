@@ -507,6 +507,110 @@ Per-port holdout figures rest on 1–6 calls each. The number to beat is
 the holdout all-rows MAE, **0.874 h**, on this cutoff; re-run `ml.eval`
 when the model is evaluated so both use the same dataset and split.
 
+## 2026-09-06 — XGBoost ETA model, first run (pipeline validation only)
+
+**64 training calls is too small for this result to mean anything.** The
+run exists to prove the pipeline — dataset → features → train → holdout →
+registry — before the dataset grows. Read the numbers as "it works," not
+as "it's good."
+
+`ml/dataset.py` is now the single definition of the labelled dataset
+(shared by `ml.eval` and `ml.train`); `ml/features.py` is pure feature
+engineering; `ml/train.py` trains with XGBoost's native `xgb.train` at its
+documented defaults (`reg:squarederror`, `eta 0.3`, `max_depth 6`, 100
+rounds, `seed 0`) and scores baseline and model on the **identical**
+temporal split-by-call. Native API because `XGBRegressor` in XGBoost 3.x
+requires scikit-learn, which is not in the stack. Pin: `xgboost-cpu==3.4.1`
+in `requirements-ml.txt` (23 MB, numpy + scipy only; the GPU `xgboost`
+wheel drags `nvidia-nccl-cu13`). 12 new tests; 86 in the suite.
+
+**Missing vessel attributes → NaN, handled natively by XGBoost** (a default
+branch per split); no imputation. Measured NaN share in train: `draught_m`
+24.9%, `cog` / `bearing_minus_cog` 5.3%, everything else 0%.
+
+```
+.venv/bin/python -m ml.train
+```
+
+```
+dataset: rows=3513 calls=81 gate=MAX_KMH 60 baseline_floor=1 kn holdout_frac=0.2 xgboost=3.4.1
+temporal cutoff on arrival_at: 2026-09-06T07:04:40.190297+00:00
+train:   rows=2415 calls=64
+holdout: rows=1098 calls=17
+```
+
+The dataset grew since the baseline entry (3,165 → 3,513 rows; cutoff
+06:59:14 → 07:04:40), so the baseline is **recomputed on this split** —
+that is the like-for-like number, not the 0.874 h recorded earlier.
+
+### Holdout — 1,098 rows, 17 calls (train: 64 calls)
+
+| predictor | MAE, all rows | MAE, `sog >= 1 kn` (913 rows) |
+|---|---|---|
+| baseline (dist / speed, 1 kn floor) | **0.814 h (48.9 min)** | 0.399 h |
+| XGBoost, defaults | **0.394 h (23.6 min)** | 0.360 h |
+| improvement | **+51.7%** | +9.8% |
+
+| distance band | n | baseline | xgboost |
+|---|---|---|---|
+| 0–5 km | 575 | 0.440 h | 0.339 h |
+| 5–10 km | 296 | 0.715 h | 0.429 h |
+| 10–15 km | 227 | 1.892 h | 0.486 h |
+
+| port | rows | calls | baseline | xgboost |
+|---|---|---|---|---|
+| Rotterdam | 565 | 10 | 0.703 h | 0.358 h |
+| Southampton | 143 | 2 | 0.425 h | 0.214 h |
+| Amsterdam | 117 | 1 | 2.556 h | 0.325 h |
+| Zeebrugge | 104 | 1 | 0.872 h | 0.807 h |
+| Wilhelmshaven | 80 | 1 | 0.179 h | 0.512 h |
+| Vlissingen | 53 | 1 | 0.074 h | 0.211 h |
+| Antwerp | 36 | 1 | 0.787 h | 0.704 h |
+
+Seven of the eleven ports in the holdout have exactly one call.
+
+### In-sample, reference only — 2,415 rows, 64 calls
+
+XGBoost train MAE **0.008 h (0.5 min)** across every band and port. The
+model reproduces its 64 training calls almost exactly; that is
+memorisation, and it is why the holdout number is the only one that
+counts.
+
+### Feature importances (gain share, split count)
+
+| feature | gain | splits |
+|---|---|---|
+| length_m | 23.5% | 187 |
+| width_m | 16.0% | 158 |
+| dist_m | 12.8% | 1,057 |
+| draught_m | 12.4% | 220 |
+| bearing_minus_cog | 9.7% | 563 |
+| hour_utc | 9.3% | 695 |
+| sog | 6.8% | 617 |
+| ship_type | 6.3% | 116 |
+| cog | 2.0% | 609 |
+| minutes_in_anchorage | 1.4% | 385 |
+
+With 64 calls, `length_m` and `width_m` are effectively vessel
+identifiers: the highest-gain features let the trees find *which ship*,
+not how ships approach. Expect this ranking to change as calls accumulate
+across many vessels; `dist_m` carrying the most splits but not the most
+gain is the tell.
+
+### Registry
+
+```
+docker compose exec -T db psql -U sawari -d sawari -x -c \
+  "SELECT * FROM model_registry ORDER BY id DESC LIMIT 1;"
+# id=1 name=xgb_eta version=20260906T074941Z train_rows=2415
+# holdout_start=2026-09-06 07:04:40 baseline_mae_hours=0.8145 model_mae_hours=0.3936
+# artifact_path=ml/artifacts/xgb_eta_20260906T074941Z.json is_active=f
+# params: features, xgb_params, cutoff, train_calls=64, holdout_calls=17, nan_share_train, improvement_pct=51.7
+```
+
+Artifact is 530 KB, gitignored (`ml/artifacts/`). `is_active` stays
+false — nothing serves this model.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
