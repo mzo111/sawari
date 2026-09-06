@@ -1,0 +1,2 @@
+-r requirements.txt
+xgboost-cpu==3.4.1
