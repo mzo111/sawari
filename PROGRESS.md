@@ -611,6 +611,84 @@ docker compose exec -T db psql -U sawari -d sawari -x -c \
 Artifact is 530 KB, gitignored (`ml/artifacts/`). `is_active` stays
 false — nothing serves this model.
 
+## 2026-09-06 — vessel-leakage diagnostics (2×2, one snapshot, no registry writes)
+
+`ml.train --diagnostics` loads the dataset once and runs split ∈
+{temporal, group} × features ∈ {all 10, without `ship_type`/`length_m`/
+`width_m`/`draught_m`}. `group` = the temporal split with every vessel
+that appears in the holdout purged from training; the holdout is
+byte-for-byte the temporal holdout. Default split unchanged (`temporal`).
+XGBoost defaults unchanged. 4 new tests; 90 in the suite.
+
+```
+.venv/bin/python -m ml.train --diagnostics
+```
+
+### Overlap under the temporal split (cutoff 2026-09-06T07:18:26Z)
+
+| | |
+|---|---|
+| dataset | 3,953 rows, 86 calls, **85 distinct MMSIs** |
+| calls per vessel | 84 vessels with one call, 1 with two |
+| train | 68 calls, 68 vessels, 2,769 rows |
+| holdout | 18 calls, 18 vessels, 1,184 rows |
+| MMSIs on both sides | **1** |
+| holdout calls whose vessel is in train | **1 of 18** |
+| training after purge (group split) | 67 calls, 67 vessels, 2,766 rows |
+
+### Holdout MAE, all four cells (holdout identical in every cell: 1,184 rows, 18 calls)
+
+| split | features | train calls / vessels / rows | baseline | model | improvement |
+|---|---|---|---|---|---|
+| temporal | all (10) | 68 / 68 / 2,769 | 0.918 h | 0.480 h | +47.7% |
+| temporal | no vessel attrs (6) | 68 / 68 / 2,769 | 0.918 h | **0.471 h** | +48.7% |
+| group | all (10) | 67 / 67 / 2,766 | 0.918 h | 0.488 h | +46.8% |
+| group | no vessel attrs (6) | 67 / 67 / 2,766 | 0.918 h | **0.469 h** | +48.9% |
+
+In-sample (train) model MAE: 0.011 h with all features, 0.020 h without
+the vessel attributes; 0.011 h / 0.021 h under the group split.
+
+Holdout by distance band, temporal split:
+
+| band | n | baseline | all (10) | no vessel attrs (6) |
+|---|---|---|---|---|
+| 0–5 km | 567 | 0.462 h | 0.355 h | 0.335 h |
+| 5–10 km | 348 | 0.861 h | 0.563 h | 0.581 h |
+| 10–15 km | 269 | 1.953 h | 0.635 h | 0.615 h |
+
+Holdout by port, temporal split (calls in parentheses):
+
+| port | rows | baseline | all (10) | no vessel attrs (6) |
+|---|---|---|---|---|
+| Rotterdam (9) | 547 | 0.666 h | 0.442 h | 0.457 h |
+| Amsterdam (2) | 191 | 1.896 h | 0.387 h | 0.375 h |
+| Felixstowe (1) | 131 | 1.684 h | 0.748 h | 0.734 h |
+| Zeebrugge (1) | 104 | 0.872 h | 0.785 h | 0.748 h |
+| Wilhelmshaven (1) | 80 | 0.179 h | 0.479 h | 0.388 h |
+| Vlissingen (1) | 53 | 0.074 h | 0.231 h | 0.149 h |
+| Southampton (2) | 42 | 0.067 h | 0.071 h | 0.117 h |
+| Antwerp (1) | 36 | 0.787 h | 0.532 h | 0.508 h |
+
+### Feature importances (gain share, split count)
+
+| feature | temporal, all | temporal, no vessel attrs | group, all | group, no vessel attrs |
+|---|---|---|---|---|
+| length_m | 20.5% (220) | — | 21.8% (192) | — |
+| width_m | 18.2% (153) | — | 19.1% (154) | — |
+| draught_m | 14.8% (230) | — | 13.3% (245) | — |
+| dist_m | 12.9% (1,002) | **31.4%** (1,267) | 12.0% (1,053) | **29.4%** (1,235) |
+| ship_type | 8.1% (114) | — | 8.7% (107) | — |
+| hour_utc | 8.1% (717) | 24.2% (827) | 8.3% (697) | 23.5% (815) |
+| sog | 7.1% (669) | 18.2% (780) | 7.4% (629) | 18.0% (825) |
+| bearing_minus_cog | 6.9% (577) | 12.7% (718) | 6.2% (602) | 13.2% (687) |
+| minutes_in_anchorage | 2.0% (385) | 5.6% (439) | 2.1% (369) | 6.5% (425) |
+| cog | 1.4% (576) | 8.0% (814) | 1.2% (529) | 9.4% (771) |
+
+Dataset time span for reference against `hour_utc`: `arrival_at` from
+05:12 to 07:35 UTC on one day.
+
+Nothing was written to `model_registry` (still 1 row) or `ml/artifacts/`.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
