@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ml.baseline import SOG_FLOOR_KN, Row, eta_hours, is_floored, mae, temporal_split
+from ml.baseline import SOG_FLOOR_KN, eta_hours, is_floored, mae, temporal_split
+from ml.dataset import Row
 
 T0 = datetime(2026, 9, 6, 6, 0, tzinfo=timezone.utc)
 
@@ -14,6 +15,7 @@ def at(minutes):
 def row(call_id, arrival_minutes, minutes_before=10, port="Rotterdam"):
     return Row(
         call_id=call_id, port=port,
+        approach_at=at(arrival_minutes - 60),
         arrival_at=at(arrival_minutes), time=at(arrival_minutes - minutes_before),
         dist_m=5000.0, sog=8.0, hours_to_arrival=minutes_before / 60,
     )

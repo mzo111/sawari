@@ -7,8 +7,11 @@ about the shape of the earth.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .dataset import Row
 
 METRES_PER_NM = 1852.0
 
@@ -17,17 +20,6 @@ METRES_PER_NM = 1852.0
 # jitter gives arbitrary hours; clamping gives a finite, pessimistic answer
 # that a real model has to beat.
 SOG_FLOOR_KN = 1.0
-
-
-@dataclass(frozen=True)
-class Row:
-    call_id: int
-    port: str
-    arrival_at: datetime
-    time: datetime
-    dist_m: float
-    sog: float | None
-    hours_to_arrival: float
 
 
 def eta_hours(dist_m: float, sog_kn: float | None) -> float:
