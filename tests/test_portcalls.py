@@ -6,7 +6,7 @@ just (minutes, metres from port, speed) triples.
 
 from datetime import datetime, timedelta, timezone
 
-from ml.portcalls import Call, Obs, Port, detect
+from ml.portcalls import Call, Obs, Port, detect, plausible
 
 T0 = datetime(2026, 9, 6, 6, 0, tzinfo=timezone.utc)
 PORTS = {1: Port(1, 15000, 3000), 2: Port(2, 15000, 3000)}
@@ -177,3 +177,86 @@ def test_interleaved_vessels_are_independent():
     assert by_mmsi[MMSI].departure_at == at(10)
     assert by_mmsi[OTHER].arrival_at == at(5)
     assert by_mmsi[OTHER].departure_at == at(10)
+
+
+# ------------------------------------------------------ plausibility gate
+
+
+def fix(minutes, dist_m=10000, sog=8.0, prev=None, nxt=None):
+    return Obs(MMSI, 1, at(minutes), dist_m, sog, prev, nxt)
+
+
+def test_gate_keeps_fixes_with_unknown_speeds():
+    obs = [fix(0), fix(5, prev=20.0), fix(10, prev=20.0)]
+    assert plausible(obs, 60.0) == obs
+
+
+def test_gate_drops_on_previous_jump():
+    assert plausible([fix(5, prev=61.0)], 60.0) == []
+
+
+def test_gate_drops_on_next_jump():
+    assert plausible([fix(5, nxt=61.0)], 60.0) == []
+
+
+def test_gate_threshold_is_inclusive():
+    kept = fix(5, prev=60.0, nxt=60.0)
+    assert plausible([kept, fix(10, prev=60.01)], 60.0) == [kept]
+
+
+def test_gate_drops_every_fix_of_an_alternating_collision():
+    obs = [
+        fix(0, nxt=4000.0),
+        fix(2, prev=4000.0, nxt=4000.0),
+        fix(4, prev=4000.0, nxt=4000.0),
+        fix(6, prev=4000.0),
+    ]
+    assert plausible(obs, 60.0) == []
+
+
+def test_gate_drops_spike_and_both_neighbours():
+    obs = [
+        fix(0, nxt=20.0),
+        fix(5, prev=20.0, nxt=900.0),
+        fix(10, prev=900.0, nxt=900.0),
+        fix(15, prev=900.0, nxt=20.0),
+        fix(20, prev=20.0, nxt=20.0),
+        fix(25, prev=20.0),
+    ]
+    assert plausible(obs, 60.0) == [obs[0], obs[4], obs[5]]
+
+
+def test_collided_track_yields_no_calls_after_gate():
+    # The Zeebrugge shape: berthed, 159 km away 2 min later, back again.
+    obs = [
+        fix(0, 1000, 0.1, nxt=4000.0),
+        fix(2, 159000, 15.5, prev=4000.0, nxt=2500.0),
+        fix(6, 1000, 0.1, prev=2500.0),
+    ]
+    ungated = detect([], obs, PORTS)
+    assert len(ungated.opened) == 2
+    gated = detect([], plausible(obs, 60.0), PORTS)
+    assert gated.opened == [] and gated.updated == []
+
+
+def test_track_with_one_spike_still_yields_one_clean_call():
+    obs = [
+        fix(0, 10000, 8.0, nxt=20.0),
+        fix(5, 2000, 0.1, prev=20.0, nxt=900.0),
+        fix(10, 200000, 12.0, prev=900.0, nxt=900.0),
+        fix(15, 2000, 0.1, prev=900.0, nxt=20.0),
+        fix(20, 2000, 0.1, prev=20.0, nxt=25.0),
+        fix(25, 20000, 12.0, prev=25.0),
+    ]
+    assert len(detect([], obs, PORTS).opened) == 2
+    result = detect([], plausible(obs, 60.0), PORTS)
+    assert len(result.opened) == 1
+    call = result.opened[0]
+    assert call.approach_at == at(0)
+    assert call.arrival_at == at(20)   # the fix at 5 was a spike neighbour
+    assert call.departure_at == at(25)
+
+
+def test_gate_preserves_order():
+    obs = [fix(0), fix(5, prev=10.0), fix(10, prev=10.0)]
+    assert [o.time for o in plausible(obs, 60.0)] == [at(0), at(5), at(10)]

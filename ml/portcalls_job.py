@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
-from .portcalls import Call, Obs, Port, detect
+from .portcalls import Call, Obs, Port, detect, plausible
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +30,12 @@ log = logging.getLogger("portcalls")
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://sawari:sawari@localhost:5432/sawari"
 )
+
+# Implied speed between consecutive fixes above this is a position jump, not
+# movement: in the first run 28% of closed calls had departures implying
+# >150 km/h from two transponders sharing one MMSI (PROGRESS.md 2026-09-06).
+# 60 km/h is 32 kn, stricter than the parser's 50 kn sog ceiling.
+MAX_KMH = 60.0
 
 PORTS = "SELECT id, anchorage_radius_m, berth_radius_m FROM ports"
 
@@ -53,14 +59,26 @@ WHERE pos.time > $1
 """
 
 # Every position of the vessel in the window, not just in-range ones:
-# departure is the first fix *outside* the anchorage.
+# departure is the first fix *outside* the anchorage. Implied speed to the
+# neighbouring fixes is measured here, once per MMSI, and gated in Python.
 OBSERVATIONS = """
-SELECT pos.mmsi, k.port_id, pos.time,
-       ST_Distance(p.geom::geography, pos.geom::geography) AS dist_m, pos.sog
-FROM unnest($1::bigint[], $2::int[]) AS k(mmsi, port_id)
+WITH fixes AS (
+    SELECT mmsi, time, geom, sog,
+           ST_Distance(geom::geography, (lag(geom) OVER w)::geography)
+             / NULLIF(EXTRACT(EPOCH FROM (time - lag(time) OVER w)), 0) * 3.6 AS kmh_prev,
+           ST_Distance(geom::geography, (lead(geom) OVER w)::geography)
+             / NULLIF(EXTRACT(EPOCH FROM (lead(time) OVER w - time)), 0) * 3.6 AS kmh_next
+    FROM positions
+    WHERE mmsi = ANY($1::bigint[]) AND time > $3
+    WINDOW w AS (PARTITION BY mmsi ORDER BY time)
+)
+SELECT f.mmsi, k.port_id, f.time,
+       ST_Distance(p.geom::geography, f.geom::geography) AS dist_m,
+       f.sog, f.kmh_prev, f.kmh_next
+FROM fixes f
+JOIN unnest($1::bigint[], $2::int[]) AS k(mmsi, port_id) ON k.mmsi = f.mmsi
 JOIN ports p ON p.id = k.port_id
-JOIN positions pos ON pos.mmsi = k.mmsi AND pos.time > $3
-ORDER BY pos.mmsi, k.port_id, pos.time
+ORDER BY f.mmsi, k.port_id, f.time
 """
 
 INSERT_CALL = """
@@ -99,11 +117,16 @@ async def run_once(pool: asyncpg.Pool, since_minutes: int) -> dict[str, float | 
         pairs = {(r["mmsi"], r["port_id"]) for r in await conn.fetch(CANDIDATE_PAIRS, since)}
         pairs |= {(c.mmsi, c.port_id) for c in open_before}
 
-        obs: list[Obs] = []
+        fetched: list[Obs] = []
         if pairs:
             mmsis, port_ids = zip(*sorted(pairs), strict=True)
             rows = await conn.fetch(OBSERVATIONS, list(mmsis), list(port_ids), since)
-            obs = [Obs(r["mmsi"], r["port_id"], r["time"], r["dist_m"], r["sog"]) for r in rows]
+            fetched = [
+                Obs(r["mmsi"], r["port_id"], r["time"], r["dist_m"], r["sog"],
+                    r["kmh_prev"], r["kmh_next"])
+                for r in rows
+            ]
+        obs = plausible(fetched, MAX_KMH)
 
         result = detect(calls, obs, ports)
 
@@ -129,6 +152,7 @@ async def run_once(pool: asyncpg.Pool, since_minutes: int) -> dict[str, float | 
     return {
         "window_min": since_minutes,
         "obs": len(obs),
+        "gated": len(fetched) - len(obs),
         "pairs": len(pairs),
         "opened": len(result.opened),
         "arrived": arrived,
@@ -154,10 +178,10 @@ async def main(args: argparse.Namespace) -> None:
             try:
                 s = await run_once(pool, args.since_minutes)
                 log.info(
-                    "portcalls window=%dm obs=%d pairs=%d opened=%d arrived=%d "
+                    "portcalls window=%dm obs=%d gated=%d pairs=%d opened=%d arrived=%d "
                     "departed=%d open_total=%d stale_open=%d took=%.2fs",
-                    s["window_min"], s["obs"], s["pairs"], s["opened"], s["arrived"],
-                    s["departed"], s["open_total"], s["stale_open"], s["took"],
+                    s["window_min"], s["obs"], s["gated"], s["pairs"], s["opened"],
+                    s["arrived"], s["departed"], s["open_total"], s["stale_open"], s["took"],
                 )
             except Exception as exc:  # the periodic job must outlive a bad run
                 if args.once:

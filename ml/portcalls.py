@@ -32,6 +32,8 @@ class Obs:
     time: datetime
     dist_m: float
     sog: float | None
+    kmh_prev: float | None = None
+    kmh_next: float | None = None
 
 
 @dataclass
@@ -52,6 +54,18 @@ class Call:
 class Result:
     opened: list[Call] = field(default_factory=list)
     updated: list[Call] = field(default_factory=list)
+
+
+def plausible(obs: list[Obs], max_kmh: float) -> list[Obs]:
+    """Drop any fix whose jump from the previous or to the next fix implies
+    more than max_kmh. Both sides on purpose: under a shared MMSI every fix
+    has an implausible neighbour, so the whole track drops out instead of
+    labelling whichever transponder happened to report first."""
+    return [
+        o for o in obs
+        if (o.kmh_prev is None or o.kmh_prev <= max_kmh)
+        and (o.kmh_next is None or o.kmh_next <= max_kmh)
+    ]
 
 
 def detect(
