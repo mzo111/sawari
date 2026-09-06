@@ -94,6 +94,81 @@ via the 1 s backoff and confirmed by `SubscriptionConfirmation` incrementing:
 
 Source: `docker compose logs ingest | grep -E "WARNING|subscribed"`.
 
+## 2026-09-06 — region pivot to southern North Sea / Channel
+
+Decision: keep AISStream and the architecture, re-scope the target region to
+one the feed actually covers. Default box is now a single
+`[[49.0, -2.5], [56.0, 10.0]]` (49–56°N, 2.5°W–10°E). Gulf ports replaced by
+12 North Sea / Channel ports in `db/schema.sql` and the live DB
+(`port_calls` was empty, so no FK impact). Worldwide rows from the earlier
+run were kept, not deleted.
+
+### Why this box — density in the worldwide sample
+
+Top 2° cells in the N Europe bucket by distinct vessels, from the 83,767-row
+worldwide run above:
+
+| lat_cell | lon_cell | positions | vessels |
+|---|---|---|---|
+| 50 | 4 | 12,630 | 2,512 |
+| 52 | 4 | 14,701 | 2,127 |
+| 52 | 8 | 4,142 | 625 |
+| 50 | 2 | 3,139 | 594 |
+| 52 | 6 | 2,602 | 485 |
+| 54 | 10 | 1,428 | 251 |
+| 56 | 10 | 1,650 | 231 |
+| 50 | 6 | 1,029 | 227 |
+| 50 | 0 | 1,289 | 216 |
+| 54 | 18 | 949 | 192 |
+| 58 | 10 | 1,066 | 188 |
+| 50 | -2 | 1,148 | 177 |
+| 54 | 12 | 981 | 157 |
+| 58 | 18 | 1,029 | 141 |
+| 58 | 4 | 712 | 139 |
+
+Nine of the top fifteen cells fall inside the chosen box; the Baltic and
+Norwegian cells were left out deliberately (focus over breadth).
+
+```
+docker compose exec -T db psql -U sawari -d sawari -c "
+SELECT floor(ST_Y(geom)/2)*2 AS lat_cell, floor(ST_X(geom)/2)*2 AS lon_cell,
+       count(*) AS positions, count(DISTINCT mmsi) AS vessels
+FROM positions
+WHERE ST_Y(geom) BETWEEN 48 AND 72 AND ST_X(geom) BETWEEN -12 AND 32
+GROUP BY 1,2 ORDER BY vessels DESC LIMIT 15;"
+```
+
+### First run on the new box
+
+Worker rebuilt and resubscribed at 05:29:15 with no `AIS_BOUNDING_BOXES`
+override (i.e. the code default).
+
+| metric | value | source |
+|---|---|---|
+| first heartbeat | `received=4133 written=3409 rate=3408/min reconnects=0 drops[bad_mmsi=3, unhandled_SubscriptionConfirmation=1]` | `docker compose logs ingest \| grep heartbeat`, 05:30:14 |
+| second heartbeat | `received=8482 written=7075 rate=3536/min reconnects=0 drops[bad_mmsi=5, unhandled_SubscriptionConfirmation=1]` | same, 05:31:15 |
+| rows inside box / total since restart | **4,333 / 4,333** | query B, 05:29:15 → 05:30:28 |
+| distinct vessels in first 73 s | 3,563 | query B |
+
+Every row written since the restart is inside the box — AISStream filters
+server-side, so anything outside would have been a finding. Rate is roughly
+half the worldwide figure, consistent with the box being a subset.
+
+Query B:
+
+```
+docker compose exec -T db psql -U sawari -d sawari -c "
+SELECT count(*) FILTER (WHERE ST_Y(geom) BETWEEN 49 AND 56 AND ST_X(geom) BETWEEN -2.5 AND 10) AS in_box,
+       count(*) AS total, count(DISTINCT mmsi) AS vessels, min(time), max(time)
+FROM positions WHERE time > '2026-09-06 05:29:15+00';"
+```
+
+### Open item
+
+Port coordinates in `db/schema.sql` are approximate (~0.05°) and unverified
+against UN/LOCODE. `berth_radius_m` is 3 km, so a wrong basin is possible.
+Verify each before trusting `port_calls`. Does not affect ingest.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
