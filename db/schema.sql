@@ -107,9 +107,11 @@ INSERT INTO ports (unlocode, name, country, geom) VALUES
     ('DEBRV', 'Bremerhaven',      'Germany',        ST_SetSRID(ST_MakePoint( 8.5700, 53.5500), 4326)),
     ('BEZEE', 'Zeebrugge',        'Belgium',        ST_SetSRID(ST_MakePoint( 3.2000, 51.3300), 4326)),
     ('NLAMS', 'Amsterdam',        'Netherlands',    ST_SetSRID(ST_MakePoint( 4.8000, 52.4000), 4326)),
-    ('GBFXT', 'Felixstowe',       'United Kingdom', ST_SetSRID(ST_MakePoint( 1.3300, 51.9500), 4326)),
+    -- Trinity Quay: OSM way 142277246 (natural=coastline), centre 51.9592516, 1.2980022
+    ('GBFXT', 'Felixstowe',       'United Kingdom', ST_SetSRID(ST_MakePoint( 1.2980, 51.9593), 4326)),
     ('DEWVN', 'Wilhelmshaven',    'Germany',        ST_SetSRID(ST_MakePoint( 8.1300, 53.5200), 4326)),
-    ('FRDKK', 'Dunkirk',          'France',         ST_SetSRID(ST_MakePoint( 2.3500, 51.0500), 4326)),
+    -- Terminal des Flandres (Dunkerque-Ouest): OSM way 1480777223 (man_made=container_terminal), centre 51.0084674, 2.1857305
+    ('FRDKK', 'Dunkirk',          'France',         ST_SetSRID(ST_MakePoint( 2.1857, 51.0085), 4326)),
     ('FRLEH', 'Le Havre',         'France',         ST_SetSRID(ST_MakePoint( 0.1500, 49.4800), 4326)),
     ('GBSOU', 'Southampton',      'United Kingdom', ST_SetSRID(ST_MakePoint(-1.4000, 50.9000), 4326)),
     ('NLVLI', 'Vlissingen',       'Netherlands',    ST_SetSRID(ST_MakePoint( 3.6000, 51.4500), 4326))
