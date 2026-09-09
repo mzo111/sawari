@@ -157,8 +157,8 @@ and the hot window, in that order.
   # {'ping_interval': 20, 'ping_timeout': 20, 'max_queue': 32}   (websockets 13.1)
   ```
 
-- Drops are counted by reason, never silently discarded — `CLAUDE.md:73-74`.
-  Counter `:106`; reasons: `malformed_json` `:189`, `no_message_type` `:198`,
+- Drops are counted by reason, never silently discarded —
+  `WORKING-AGREEMENT.md:73-74`. Counter `:106`; reasons: `malformed_json` `:189`, `no_message_type` `:198`,
   `unhandled_<MessageType>` `:217`, every parser `DropReason` `:222`,
   `db_error` `:262` (charged the whole batch). Logged every
   `HEARTBEAT_SECONDS = 60` (`:64`, `:274`).
@@ -219,15 +219,15 @@ change to make if the loop ever shows lag, and the reason not to make it now
 is that nothing has been measured to show it's needed.
 
 **Draft — on `db_error`, drop the batch.** A failed transaction is counted
-against `db_error` (whole batch size) and discarded (`:262`). The alternative
-— retry in place — means the buffer grows unbounded while the database is
-down, until the process dies of memory, taking the ingest loop with it. That
-is the one outcome `CLAUDE.md` forbids ("uptime is the product"). Losing at
-most ~2 s of positions per failed transaction, visibly, is the cheaper
-failure. Where it's wrong: a multi-minute DB outage loses every row in it.
-The mitigation isn't code, it's the metric — `db_error` is a counter on the
-heartbeat, and it has read zero for the whole session. Spill-to-disk is the
-correct answer if that ever stops being true.
+against `db_error` (whole batch size) and discarded (`:262`). The
+alternative — retry in place — means the buffer grows unbounded while the
+database is down, until the process dies of memory, taking the ingest loop
+with it. That is the one outcome `WORKING-AGREEMENT.md` forbids ("uptime is
+the product"). Losing at most ~2 s of positions per failed transaction,
+visibly, is the cheaper failure. Where it's wrong: a multi-minute DB outage
+loses every row in it. The mitigation isn't code, it's the metric —
+`db_error` is a counter on the heartbeat, and it has read zero for the whole
+session. Spill-to-disk is the correct answer if that ever stops being true.
 
 ---
 
@@ -275,7 +275,7 @@ correct answer if that ever stops being true.
   vessels each.
 - Chosen box: `[[49.0, -2.5], [56.0, 10.0]]` — `ingest/worker.py:53-55`,
   format `[[lat_min, lon_min], [lat_max, lon_max]]` (`:46`). Recorded in
-  `CLAUDE.md:27-29`.
+  `WORKING-AGREEMENT.md:27-29`.
 - Override: `AIS_BOUNDING_BOXES` env var, JSON, same format —
   `ingest/worker.py:50-59`; passed through in `docker-compose.yml`
   (`ingest.environment`); documented in `.env.example`. The worldwide
@@ -286,7 +286,7 @@ correct answer if that ever stops being true.
   Coordinates approximate (~0.05°) and unverified against UN/LOCODE;
   `anchorage_radius_m` default 15,000, `berth_radius_m` default 3,000 —
   `db/schema.sql:63-64`, `PROGRESS.md:166-170`.
-- Commits: `e6bd303` (pivot), `a145738` (measurements).
+- Commits: `39777cf` (pivot), `de53c69` (measurements).
 
 **Draft — why zero means "no coverage," not "quiet."** AISStream aggregates
 terrestrial receivers run by volunteers; it has data where someone has put an
@@ -325,8 +325,9 @@ radii were set for Gulf ports and have not been re-examined.
 
 > TODO(mo): Why stay on AISStream instead of a paid provider with Gulf
 > coverage? Name the provider you'd have picked and the constraint that
-> ruled it out. (The repo-level constraint is `CLAUDE.md:14-15`, no new
-> dependencies without asking — but the provider and price are yours.)
+> ruled it out. (The repo-level constraint is
+> `WORKING-AGREEMENT.md:14-15`, no new dependencies without asking — but
+> the provider and price are yours.)
 
 ---
 
@@ -336,7 +337,7 @@ radii were set for Gulf ports and have not been re-examined.
 
 - `websockets.connect(AISSTREAM_URL, ping_interval=20, ping_timeout=60,
   max_queue=2048)` — `ingest/worker.py:152-156`, with a comment recording
-  the observed failure. Commit `40e2db0`.
+  the observed failure. Commit `1a334ac`.
 - The library defaults are `ping_interval=20, ping_timeout=20` (signature
   check above), so the original code was running the defaults.
 - The two drops that prompted it, worldwide box — `PROGRESS.md:85-95`:
@@ -387,7 +388,7 @@ second key from the same IP.
 
 - `ingest/parser.py` imports only `dataclasses`, `datetime`, `typing` —
   `ingest/parser.py:7-11`. No network, DB, or `now()` — convention
-  `CLAUDE.md:59`, `:70-71`. Anything impure belongs in `worker.py`.
+  `WORKING-AGREEMENT.md:59`, `:70-71`. Anything impure belongs in `worker.py`.
 - Validation constants `MAX_SOG_KNOTS`, `MMSI_MIN/MAX`, `HEADING_UNAVAILABLE`
   — `ingest/parser.py:14-16`; `DropReason` — `:19-25`; `parse_time`
   truncates AISStream's nanosecond `time_utc` to microseconds — `:55-72`.
@@ -398,7 +399,7 @@ second key from the same IP.
   # 35 passed
   ```
 
-  Commit `45737b3`. CI runs `ruff check .` and `python -m pytest -q` on push
+  Commit `943b110`. CI runs `ruff check .` and `python -m pytest -q` on push
   and PR — `.github/workflows/ci.yml`.
 - `worker.py` has no tests.
 
@@ -418,11 +419,12 @@ next tests to write; the reconnect/backoff loop is what the soak is for.
 
 ### 4.4 Windows/WSL executable bit
 
-- Initial commit `b1d108e` created seven files as `100755`: `CLAUDE.md`,
+- Initial commit `b1d108e` created seven files as `100755`:
+  `WORKING-AGREEMENT.md`,
   `db/schema.sql`, `docker-compose.yml`, `ingest/parser.py`,
   `ingest/worker.py`, `ops/Dockerfile.ingest`, `requirements.txt`.
-- Fixed in `d5f71f7` ("Drop stray executable bit on Python modules (Windows
-  filesystem artifact)") and `b6bc193` ("Drop executable bit on
+- Fixed in `637b43c` ("Drop stray executable bit on Python modules (Windows
+  filesystem artifact)") and `d2b2668` ("Drop executable bit on
   non-executable files"). Files created later in the session (`tests/`,
   `.github/`, `.env.example`, `PROGRESS.md`, `requirements-dev.txt`) were
   `100644` from the start.

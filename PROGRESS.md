@@ -6,7 +6,7 @@ Times are UTC from the ingest container clock / `positions.time`.
 ## 2026-09-06 — first live ingest, worldwide box
 
 Worker rebuilt with `AIS_BOUNDING_BOXES=[[[-90,-180],[90,180]]]` and
-`ping_timeout=60` (commit `40e2db0`). Ran locally on WSL2 against the
+`ping_timeout=60` (commit `1a334ac`). Ran locally on WSL2 against the
 compose stack; **not** the VPS.
 
 ### Message rate
