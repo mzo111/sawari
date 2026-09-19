@@ -56,6 +56,39 @@ class Result:
     updated: list[Call] = field(default_factory=list)
 
 
+class MmsiGrouper:
+    """Splits an mmsi-ordered stream of Obs into consecutive per-vessel runs.
+
+    Feed rows one at a time with push(); it returns the just-completed
+    group the instant a new mmsi starts, or None while still buffering the
+    current vessel. Call flush() once after the last row to get the final
+    group. Requires the input already ordered by mmsi — the same ORDER BY
+    ml.portcalls_job.OBSERVATIONS uses — so this never has to look ahead
+    or buffer more than one vessel's rows at a time. That bound is the
+    fix for the full-history rebuild OOM (PROGRESS.md 2026-09-19): the
+    old code fetched every candidate vessel's entire history into one
+    Python list before processing any of it, so peak memory grew with
+    total history rather than the largest single vessel's history.
+    """
+
+    def __init__(self) -> None:
+        self._buffer: list[Obs] = []
+
+    def push(self, obs: Obs) -> list[Obs] | None:
+        done = None
+        if self._buffer and obs.mmsi != self._buffer[0].mmsi:
+            done = self._buffer
+            self._buffer = []
+        self._buffer.append(obs)
+        return done
+
+    def flush(self) -> list[Obs] | None:
+        if not self._buffer:
+            return None
+        done, self._buffer = self._buffer, []
+        return done
+
+
 def plausible(obs: list[Obs], max_kmh: float) -> list[Obs]:
     """Drop any fix whose jump from the previous or to the next fix implies
     more than max_kmh. Both sides on purpose: under a shared MMSI every fix

@@ -890,6 +890,178 @@ proves the guard actually works, not just that it reads right.
   cutoff`: 1,923 rows, **59 calls**) and its holdout side (74 calls
   total, 15 in holdout) — same single-day dataset.
 
+## 2026-09-19 — full-history port_calls rebuild OOM-killed on the VPS; fixed
+
+`scripts/retrain_vps.sh` step 2 was killed twice on the VPS (exit 137,
+confirmed in `dmesg`) rebuilding `port_calls` over the full soak:
+
+| attempt | instance | RAM | RSS at kill |
+|---|---|---|---|
+| 1 | e2-medium | 4 GB | 2.3 GB |
+| 2 | e2-standard-4 | 16 GB | 14.6 GB |
+
+Dataset: 53,005,852 rows in `positions`, 2026-09-07 04:14 → 2026-09-19
+00:05 UTC. More RAM didn't fix it — 6.3× the memory only bought 6.3× more
+headroom before the same kill, which is the signature of a size that
+scales with the dataset rather than a fixed working set.
+
+### Cause
+
+`ml/portcalls_job.py`'s old `run_once()` ran one `OBSERVATIONS` query for
+**every** candidate vessel in the window and materialised the entire
+result with a single `conn.fetch()` before processing any of it. That
+query has no per-vessel bound — `WHERE mmsi = ANY($1) AND time > $3`
+returns a vessel's *entire* history in the window, not just its fixes
+near a port, because detecting departure needs every fix after entry.
+A candidate vessel that spends 12 days broadcasting inside the North Sea
+box (most of them, since the box is small) contributes thousands of rows
+to that one `conn.fetch()` regardless of how briefly it actually visited
+an anchorage. Peak memory was therefore proportional to **total history
+across every candidate vessel**, not to any one vessel's history — hence
+more RAM just moving the wall back proportionally.
+
+### Fix: stream one vessel's fixes at a time
+
+`OBSERVATIONS` is unchanged (`ml/portcalls_job.py:71-89`, same SQL, same
+params) — only how it's *consumed* changed. `run_once()` now opens it as
+an asyncpg server-side cursor (`conn.cursor(..., prefetch=CURSOR_PREFETCH)`,
+`CURSOR_PREFETCH = 2000` rows/round-trip) instead of `conn.fetch()`. The
+query already `ORDER BY f.mmsi, k.port_id, f.time`, so a new pure class,
+`MmsiGrouper` (`ml/portcalls.py`), buffers rows and hands back a
+completed group the instant the mmsi changes — never more than one
+vessel's rows at a time. Each completed group goes straight through the
+same `plausible()` → `detect()` pipeline as before (both unchanged,
+still gated by `MAX_KMH = 60`), and results accumulate the same way.
+9 new tests for `MmsiGrouper`, all pure (no DB, no asyncio): contiguous
+runs, flush with/without a pending group, every row a different mmsi,
+and a full round-trip reconstructing all input rows from the emitted
+groups. 96 in the suite (was 90).
+
+### Proof: old vs. new detector, same local window, byte-for-byte
+
+Local DB only (WSL2 compose stack — its `positions` is the pre-soak
+805,340-row snapshot, 2026-09-06 05:11:59 → 2026-09-07 04:16:32; the
+53M-row VPS dataset isn't reachable from this session). Same
+`--since-minutes 18547` passed to both runs, computed once so both cover
+the identical window (the exact value doesn't matter here — `positions`
+is static locally and `since` only needs to precede `min(time)`, which
+any of these values does).
+
+```
+# old code (image built before the fix)
+docker compose exec -T db psql -c "TRUNCATE port_calls;"
+docker compose run --rm -T portcalls python -c "
+import resource, subprocess
+p = subprocess.run(['python','-m','ml.portcalls_job','--once','--since-minutes','18547'])
+print('OLD peak_rss_mb=%.1f' % (resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss/1024))"
+# window=18547m obs=247141 gated=3290 pairs=3002 opened=3030 arrived=854 departed=294 open_total=2736
+# OLD peak_rss_mb=145.8
+
+docker compose exec -T db psql -c "CREATE TABLE port_calls_old AS TABLE port_calls;"
+
+# new code (image rebuilt with the fix)
+docker compose build -q portcalls
+docker compose exec -T db psql -c "TRUNCATE port_calls;"
+docker compose run --rm -T portcalls python -c "
+import resource, subprocess
+p = subprocess.run(['python','-m','ml.portcalls_job','--once','--since-minutes','18547'])
+print('NEW peak_rss_mb=%.1f' % (resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss/1024))"
+# window=18547m obs=247141 gated=3290 pairs=3002 opened=3030 arrived=854 departed=294 open_total=2736
+# NEW peak_rss_mb=33.9
+
+docker compose exec -T db psql -c "
+SELECT (SELECT count(*) FROM port_calls_old) AS old_calls,
+       (SELECT count(*) FROM port_calls) AS new_calls,
+       (SELECT count(*) FROM (SELECT mmsi,port_id,approach_at,arrival_at,departure_at FROM port_calls_old
+          EXCEPT SELECT mmsi,port_id,approach_at,arrival_at,departure_at FROM port_calls) d1) AS in_old_not_new,
+       (SELECT count(*) FROM (SELECT mmsi,port_id,approach_at,arrival_at,departure_at FROM port_calls
+          EXCEPT SELECT mmsi,port_id,approach_at,arrival_at,departure_at FROM port_calls_old) d2) AS in_new_not_old;"
+```
+
+| | old | new |
+|---|---|---|
+| calls | 3,030 | 3,030 |
+| arrivals | 854 | 854 |
+| departed | 294 | 294 |
+| obs (post-gate) | 247,141 − 3,290 | 247,141 − 3,290 |
+| **peak RSS** | **145.8 MB** | **33.9 MB (4.3× less)** |
+| rows in old, missing from new | — | **0** |
+| rows in new, missing from old | — | **0** |
+
+Identical stats line, identical row set (`EXCEPT` both directions on the
+business columns — `id` excluded since it's a surrogate key, not part of
+detection). Peak RSS dropped 4.3× even at this modest 805K-row local
+scale; RSS measured via `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss`
+around a `subprocess.run()` of the job (Linux, exact — the whole run's
+peak, not a sampled approximation).
+
+**What this local run does and doesn't prove.** It proves correctness
+(identical output) and shows the fix reduces peak RSS in the same
+direction the VPS needs. It does **not** reproduce the VPS's 53M-row OOM
+— local `positions` is 66× smaller, so the old code's 145.8 MB here was
+never going to crash anything. The structural argument for why the new
+code stays bounded at VPS scale: peak memory is now the cursor's
+`prefetch` buffer (2,000 rows, i.e. tens of KB) plus one `MmsiGrouper`
+group, and a group's size is bounded by one vessel's fix count over the
+window, not by the number of candidate vessels or total positions — that
+bound doesn't change whether the table has 805K rows or 53M. Confirming
+the actual VPS number is the next `scripts/retrain_vps.sh` run.
+
+### Checked: do `ml.eval` / `ml.train` have the same bug?
+
+No — measured, not assumed. `ml.dataset.load_rows()` (used by both) also
+does a single `conn.fetch()`, so the same failure mode was worth
+checking. The difference: `DATASET`'s final `SELECT` filters to fixes
+*inside the anchorage, strictly before arrival* (`ml/dataset.py:67-69`)
+before anything reaches Python — that's the labelled training set, not
+raw history, and it doesn't grow with total `positions`, it grows with
+port-call volume and anchorage dwell time.
+
+```
+# server-side scan behind ml.dataset.DATASET's `fixes` CTE, local DB
+docker compose exec -T db psql -c "
+WITH labelled AS (SELECT c.mmsi, c.approach_at FROM port_calls c
+  WHERE c.arrival_at IS NOT NULL AND c.approach_at < c.arrival_at)
+SELECT count(*) AS candidate_vessels,
+  (SELECT count(*) FROM positions WHERE mmsi IN (SELECT mmsi FROM labelled)
+     AND time >= (SELECT min(approach_at) FROM labelled)) AS fixes_cte_rows_serverside,
+  (SELECT count(*) FROM positions) AS total_positions
+FROM (SELECT DISTINCT mmsi FROM labelled) x;"
+# candidate_vessels=100  fixes_cte_rows_serverside=13,394  total_positions=805,340 (1.7%)
+
+docker compose run --rm -T ml python -c "
+import resource, subprocess
+p = subprocess.run(['python','-m','ml.eval'])
+print('ml.eval peak_rss_mb=%.1f' % (resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss/1024))"
+# dataset: rows=5097 calls=101 ...
+# ml.eval peak_rss_mb=36.3
+
+docker compose run --rm -T ml python -c "
+import resource, subprocess
+p = subprocess.run(['python','-m','ml.train','--dry-run'])
+print('ml.train peak_rss_mb=%.1f' % (resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss/1024))"
+# ml.train peak_rss_mb=94.3
+```
+
+| | value |
+|---|---|
+| `positions`, local | 805,340 |
+| server-side `fixes` CTE scan (100 candidate vessels) | 13,394 (1.7% of `positions`) |
+| `ml.eval` dataset materialised in Python | 5,097 rows, peak RSS 36.3 MB |
+| `ml.train --dry-run` (adds XGBoost + DMatrix) | peak RSS 94.3 MB |
+
+Both stay tiny because the row count they load is capped by the
+*labelled* dataset (in-anchorage, pre-arrival fixes), which is a small,
+roughly constant multiple of the number of port calls — not of
+`positions`. At full soak scale port calls scale with soak duration, not
+with `positions` row count, so this dataset should stay in the same
+order of magnitude even at 53M positions. Same caveat as above: this is
+local-scale evidence plus the query's structure, not a 53M-row
+measurement — nothing here needed the same fix, so nothing was changed
+in `ml/dataset.py`, `ml/eval.py`, or `ml/train.py`.
+
+`ingest` was not touched at any point in this investigation.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second

@@ -495,3 +495,89 @@ on ext4 rather than a `/mnt/c` mount.
 > TODO(mo): Where did the `755` actually come from — files authored on a
 > `/mnt/c` (drvfs) mount, copied from Windows, or an editor default? The
 > session has no evidence either way.
+
+### 4.5 Port-call detector: per-vessel streaming, not batch-fetch
+
+- `ml/portcalls_job.py`'s full-history `port_calls` rebuild was OOM-killed
+  twice on the VPS (exit 137, `dmesg`): 2.3 GB RSS on a 4 GB instance,
+  14.6 GB RSS on a 16 GB instance, same 53,005,852-row dataset both times
+  (`PROGRESS.md` 2026-09-19). More RAM bought proportionally more
+  headroom, not survival — the signature of a working set that scales
+  with the dataset, not a fixed size.
+- Cause: `run_once()` ran the `OBSERVATIONS` query for every candidate
+  vessel in the window in one `conn.fetch()`, and that query has no
+  per-vessel bound — `WHERE mmsi = ANY($1) AND time > $3` returns a
+  vessel's whole history in the window (needed because departure is
+  "first fix outside the anchorage," which can be arbitrarily far past
+  the last in-anchorage fix), not just its near-port fixes. Peak memory
+  was proportional to total history summed across every candidate
+  vessel.
+- Fix: `OBSERVATIONS` itself is byte-for-byte unchanged
+  (`ml/portcalls_job.py:71-89`) — only its consumption changed, from
+  `conn.fetch()` to an asyncpg server-side cursor
+  (`conn.cursor(..., prefetch=2000)`), combined with a new pure class,
+  `MmsiGrouper` (`ml/portcalls.py`), that buffers the cursor's rows and
+  emits a completed group the instant the mmsi changes.
+- Measured locally (805K-row dataset, 66× smaller than the VPS one — the
+  VPS isn't reachable from this session): old code peak RSS 145.8 MB, new
+  code 33.9 MB (4.3× less), and the two runs' `port_calls` tables are
+  identical row-for-row on every business column (3,030 calls each, 0
+  rows in either table missing from the other). `ml.eval`/`ml.train` were
+  checked too — their `conn.fetch()` result is the labelled training set
+  (in-anchorage, pre-arrival fixes only), 5,097 rows / 36.3 MB peak RSS
+  locally against the same 805K positions, because it's bounded by
+  port-call volume, not by `positions` size; nothing there needed the
+  same fix.
+
+**Draft — why a cursor + grouper instead of one query per vessel.** The
+obvious alternative to "fetch everything at once" is "fetch one vessel at
+a time": loop over candidate mmsis and issue `OBSERVATIONS` with a single
+mmsi each. That bounds memory identically but costs one round trip per
+vessel — thousands of round trips on a soak-scale candidate set, each
+paying network and query-planning latency for what the batched version
+paid once. A server-side cursor gets the same memory bound a different
+way: Postgres still plans and executes `OBSERVATIONS` once, for every
+candidate vessel, exactly as before; what changes is that the *client*
+only pulls `prefetch` rows (2,000) at a time instead of the whole result.
+`MmsiGrouper` then re-derives the per-vessel boundary from the stream
+using the query's own `ORDER BY f.mmsi, k.port_id, f.time` — cheap,
+because Postgres already had to produce that order for the window
+functions in the `fixes` CTE, so grouping by it in Python is free, not
+an extra sort. The trade this makes: `MmsiGrouper` depends on that
+ordering contract holding. If someone edits `OBSERVATIONS` and drops or
+reorders the `ORDER BY`, the grouper will silently produce wrong groups
+— fixes from the same vessel scattered into several "groups" — with no
+error, just wrong `port_calls` rows. That's the one place this design is
+fragile, and it isn't tested by a real database, only by the pure
+`MmsiGrouper` tests (which assume, correctly, that their input already
+arrives in contiguous runs). A slower but self-checking alternative would
+assert each incoming row's mmsi is `>=` the previous one and raise
+otherwise; not done here, to keep `run_once()`'s diff to the fetch
+mechanism only, not a new invariant this run never had before.
+
+**Draft — why `CANDIDATE_PAIRS` and `RELEVANT_CALLS` weren't touched.**
+Both still use a plain `conn.fetch()`. `CANDIDATE_PAIRS` returns
+*distinct* (mmsi, port_id) pairs — bounded by how many vessels ever
+entered an anchorage in the window, not by `positions` row count; at the
+scale this project has seen so far that's thousands, not millions.
+`RELEVANT_CALLS` returns existing `port_calls` rows overlapping the
+window, bounded by call volume, same order of magnitude. Neither has the
+`OBSERVATIONS` query's property of pulling a whole vessel's raw position
+history per candidate — they're both already the size of the *answer*,
+not the size of the *evidence*. Streaming them would add cursor
+plumbing for no measured benefit; if that stops being true (say, a busy
+season pushes `port_calls` into the millions), the same cursor pattern
+applies directly.
+
+**What isn't proven yet.** Everything measured above is on the 805K-row
+local dataset. The structural argument — peak memory is now one cursor
+prefetch batch plus one vessel's fix count, independent of how many
+other vessels or positions exist — should hold at 53M rows the same way
+it holds at 805K, but "should" isn't a measurement. The next
+`scripts/retrain_vps.sh` run against the real 53M-row dataset is what
+turns this from an argument into a number.
+
+> TODO(mo): Confirm on the VPS — does the fixed detector complete the
+> full-history rebuild without OOM, and what's the actual peak RSS
+> there? This section's numbers are all local; the 53M-row proof is
+> still open.

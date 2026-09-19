@@ -15,11 +15,12 @@ import logging
 import os
 import signal
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
-from .portcalls import Call, Obs, Port, detect, plausible
+from .portcalls import Call, MmsiGrouper, Obs, Port, Result, detect, plausible
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +37,12 @@ DATABASE_URL = os.environ.get(
 # >150 km/h from two transponders sharing one MMSI (PROGRESS.md 2026-09-06).
 # 60 km/h is 32 kn, stricter than the parser's 50 kn sog ceiling.
 MAX_KMH = 60.0
+
+# Rows per round trip when streaming OBSERVATIONS through the server-side
+# cursor in run_once(). This only bounds wire-transfer batching; it is not
+# how much gets buffered in Python at once — that bound is one vessel's
+# fixes, via MmsiGrouper (ml/portcalls.py).
+CURSOR_PREFETCH = 2000
 
 PORTS = "SELECT id, anchorage_radius_m, berth_radius_m FROM ports"
 
@@ -101,6 +108,11 @@ async def run_once(pool: asyncpg.Pool, since_minutes: int) -> dict[str, float | 
     started = time.monotonic()
     since = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
 
+    result = Result()
+    fetched = 0
+    gated = 0
+    seen: set[tuple[int, int]] = set()
+
     async with pool.acquire() as conn, conn.transaction():
         ports = {
             r["id"]: Port(r["id"], r["anchorage_radius_m"], r["berth_radius_m"])
@@ -113,22 +125,44 @@ async def run_once(pool: asyncpg.Pool, since_minutes: int) -> dict[str, float | 
         ]
         open_before = [c for c in calls if c.is_open]
         before = {id(c): (c.arrival_at, c.departure_at) for c in calls}
+        calls_by_mmsi: dict[int, list[Call]] = defaultdict(list)
+        for c in calls:
+            calls_by_mmsi[c.mmsi].append(c)
 
         pairs = {(r["mmsi"], r["port_id"]) for r in await conn.fetch(CANDIDATE_PAIRS, since)}
         pairs |= {(c.mmsi, c.port_id) for c in open_before}
 
-        fetched: list[Obs] = []
+        # One vessel's fixes at a time: OBSERVATIONS is ordered by
+        # (mmsi, port_id, time), so a single ordered cursor scan plus
+        # MmsiGrouper buffers at most one vessel's history in Python,
+        # instead of every candidate vessel's history at once. See
+        # MmsiGrouper's docstring and PROGRESS.md 2026-09-19.
+        def handle_group(group: list[Obs]) -> None:
+            nonlocal fetched, gated
+            fetched += len(group)
+            obs = plausible(group, MAX_KMH)
+            gated += len(group) - len(obs)
+            seen.update((o.mmsi, o.port_id) for o in obs)
+            r = detect(calls_by_mmsi.get(group[0].mmsi, []), obs, ports)
+            result.opened.extend(r.opened)
+            result.updated.extend(r.updated)
+
         if pairs:
             mmsis, port_ids = zip(*sorted(pairs), strict=True)
-            rows = await conn.fetch(OBSERVATIONS, list(mmsis), list(port_ids), since)
-            fetched = [
-                Obs(r["mmsi"], r["port_id"], r["time"], r["dist_m"], r["sog"],
-                    r["kmh_prev"], r["kmh_next"])
-                for r in rows
-            ]
-        obs = plausible(fetched, MAX_KMH)
-
-        result = detect(calls, obs, ports)
+            grouper = MmsiGrouper()
+            cursor = conn.cursor(
+                OBSERVATIONS, list(mmsis), list(port_ids), since, prefetch=CURSOR_PREFETCH
+            )
+            async for r in cursor:
+                group = grouper.push(Obs(
+                    r["mmsi"], r["port_id"], r["time"], r["dist_m"],
+                    r["sog"], r["kmh_prev"], r["kmh_next"],
+                ))
+                if group is not None:
+                    handle_group(group)
+            tail = grouper.flush()
+            if tail is not None:
+                handle_group(tail)
 
         if result.opened:
             await conn.executemany(INSERT_CALL, [
@@ -141,7 +175,6 @@ async def run_once(pool: asyncpg.Pool, since_minutes: int) -> dict[str, float | 
             ])
         open_total = await conn.fetchval(COUNT_OPEN)
 
-    seen = {(o.mmsi, o.port_id) for o in obs}
     arrived = sum(1 for c in result.opened if c.arrival_at is not None)
     departed = sum(1 for c in result.opened if c.departure_at is not None)
     for c in result.updated:
@@ -151,8 +184,8 @@ async def run_once(pool: asyncpg.Pool, since_minutes: int) -> dict[str, float | 
 
     return {
         "window_min": since_minutes,
-        "obs": len(obs),
-        "gated": len(fetched) - len(obs),
+        "obs": fetched - gated,
+        "gated": gated,
         "pairs": len(pairs),
         "opened": len(result.opened),
         "arrived": arrived,

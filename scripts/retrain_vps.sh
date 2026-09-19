@@ -11,6 +11,13 @@
 # from requirements-ml.txt, i.e. xgboost-cpu included) via
 # `docker compose run --rm`, since the VPS has no .venv. Never touches the
 # `ingest` container — PROGRESS.md 2026-09-18.
+#
+# Step 2 used to be the one that got OOM-killed on the full 53M-row soak
+# (exit 137 at 2.3 GB then 14.6 GB RSS — PROGRESS.md 2026-09-19); the
+# detector now streams one vessel's fixes at a time instead of fetching
+# every candidate vessel's history at once, so this run also reports the
+# real peak RSS on that dataset — the number DESIGN.md S4.5's TODO(mo)
+# is waiting on.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,7 +32,12 @@ SINCE_MIN=$(docker compose exec -T db psql -U sawari -d sawari -tAc \
   "SELECT ceil(EXTRACT(EPOCH FROM (now() - min(time)))/60)::int FROM positions;" | tr -d '[:space:]')
 echo "since_minutes=$SINCE_MIN"
 docker compose exec -T db psql -U sawari -d sawari -c "TRUNCATE port_calls;"
-docker compose run --rm -T portcalls python -m ml.portcalls_job --once --since-minutes "$SINCE_MIN"
+docker compose run --rm -T portcalls python -c "
+import resource, subprocess, sys
+p = subprocess.run(['python', '-m', 'ml.portcalls_job', '--once', '--since-minutes', '$SINCE_MIN'])
+print(f'peak_rss_mb={resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024:.1f}')
+sys.exit(p.returncode)
+"
 
 echo
 echo "== step 3: calls / arrivals / arrivals with an observed approach phase =="

@@ -6,7 +6,7 @@ just (minutes, metres from port, speed) triples.
 
 from datetime import datetime, timedelta, timezone
 
-from ml.portcalls import Call, Obs, Port, detect, plausible
+from ml.portcalls import Call, MmsiGrouper, Obs, Port, detect, plausible
 
 T0 = datetime(2026, 9, 6, 6, 0, tzinfo=timezone.utc)
 PORTS = {1: Port(1, 15000, 3000), 2: Port(2, 15000, 3000)}
@@ -260,3 +260,65 @@ def test_track_with_one_spike_still_yields_one_clean_call():
 def test_gate_preserves_order():
     obs = [fix(0), fix(5, prev=10.0), fix(10, prev=10.0)]
     assert [o.time for o in plausible(obs, 60.0)] == [at(0), at(5), at(10)]
+
+
+# --------------------------------------------------------- MmsiGrouper
+#
+# The bound this buys: MmsiGrouper never holds more than one vessel's
+# fixes at a time, which is what makes run_once()'s peak memory scale
+# with the largest single vessel's history rather than the total
+# (PROGRESS.md 2026-09-19). It assumes its input is already mmsi-ordered
+# in contiguous runs, exactly what OBSERVATIONS's ORDER BY guarantees —
+# these tests don't require the runs to be globally sorted, only
+# contiguous, since that's the actual contract.
+
+
+def obs_for(mmsi, n):
+    return [Obs(mmsi, 1, at(m), 10000, 8.0) for m in range(n)]
+
+
+def test_grouper_buffers_until_the_mmsi_changes():
+    g = MmsiGrouper()
+    rows = obs_for(MMSI, 3)
+    assert g.push(rows[0]) is None
+    assert g.push(rows[1]) is None
+    assert g.push(rows[2]) is None
+    done = g.push(Obs(OTHER, 1, at(0), 10000, 8.0))
+    assert done == rows
+
+
+def test_grouper_flush_returns_the_open_group():
+    g = MmsiGrouper()
+    rows = obs_for(MMSI, 2)
+    for r in rows:
+        assert g.push(r) is None
+    assert g.flush() == rows
+
+
+def test_grouper_flush_on_empty_buffer_is_none():
+    assert MmsiGrouper().flush() is None
+
+
+def test_grouper_flush_after_a_completed_group_drains_the_next_one():
+    g = MmsiGrouper()
+    g.push(obs_for(MMSI, 1)[0])
+    g.push(Obs(OTHER, 1, at(0), 10000, 8.0))  # completes the MMSI group
+    g.flush()  # drains the OTHER group
+    assert g.flush() is None
+
+
+def test_grouper_handles_every_row_a_different_mmsi():
+    mmsis = [MMSI, OTHER, 999999999]
+    g = MmsiGrouper()
+    completed = [d for m in mmsis if (d := g.push(Obs(m, 1, at(0), 10000, 8.0))) is not None]
+    completed.append(g.flush())
+    assert [group[0].mmsi for group in completed] == mmsis
+
+
+def test_grouper_reconstructs_every_row_across_many_contiguous_runs():
+    ordered = obs_for(MMSI, 3) + obs_for(OTHER, 2) + obs_for(MMSI, 1)
+    g = MmsiGrouper()
+    groups = [d for o in ordered if (d := g.push(o)) is not None]
+    groups.append(g.flush())
+    assert len(groups) == 3
+    assert [o for group in groups for o in group] == ordered
