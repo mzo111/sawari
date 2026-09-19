@@ -577,7 +577,11 @@ it holds at 805K, but "should" isn't a measurement. The next
 `scripts/retrain_vps.sh` run against the real 53M-row dataset is what
 turns this from an argument into a number.
 
-> TODO(mo): Confirm on the VPS — does the fixed detector complete the
-> full-history rebuild without OOM, and what's the actual peak RSS
-> there? This section's numbers are all local; the 53M-row proof is
-> still open.
+**Resolved 2026-09-19, on the VPS.** 53,005,852-row `positions`, 43.4M
+observations fetched (81.8% of all positions read as candidate-vessel
+fixes): peak RSS **56.5 MB**, rebuild took 2,738.59 s (45.6 min) on an
+e2-medium. No OOM. `PROGRESS.md` same date has the full numbers,
+including why the first two VPS reruns still OOM'd after this fix landed
+(a stale Docker image, not a code problem — `docker compose run` doesn't
+rebuild on its own; fixed permanently in `scripts/retrain_vps.sh` with
+`--build` on every run).

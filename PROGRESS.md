@@ -425,6 +425,11 @@ ceiling is 50 kn.
 
 ## 2026-09-06 — naive ETA baseline, temporal holdout
 
+**Superseded 2026-09-19** — see "full-soak retrain on the VPS" below.
+This entry's numbers (74 calls, 59 in the train reference side) were a
+single day of local data; the full 7–12 day soak has 5,863 calls with an
+observed approach phase.
+
 `ml/baseline.py`: `eta_hours = (dist_m / 1852) / max(sog, 1 kn)` — no
 training. Distance is PostGIS `ST_Distance(geography)` to the port point.
 `sog` below 1 kn (or `NULL`) is clamped to 1 kn: below that the reported
@@ -508,6 +513,13 @@ the holdout all-rows MAE, **0.874 h**, on this cutoff; re-run `ml.eval`
 when the model is evaluated so both use the same dataset and split.
 
 ## 2026-09-06 — XGBoost ETA model, first run (pipeline validation only)
+
+**Superseded 2026-09-19** — see "full-soak retrain on the VPS" below.
+`model_registry` id=1 in the *local* database (`xgb_eta`
+`20260906T074941Z`, train_calls=64, holdout_calls=17) is a different row
+from `model_registry` id=1 on the *VPS* (`xgb_eta` `20260919T072427Z`) —
+separate databases, separate `pgdata` volumes, both legitimately starting
+their own id sequence at 1. See that entry's model_registry note.
 
 **64 training calls is too small for this result to mean anything.** The
 run exists to prove the pipeline — dataset → features → train → holdout →
@@ -1061,6 +1073,206 @@ measurement — nothing here needed the same fix, so nothing was changed
 in `ml/dataset.py`, `ml/eval.py`, or `ml/train.py`.
 
 `ingest` was not touched at any point in this investigation.
+
+## 2026-09-19 — full-soak retrain on the VPS: memory fix confirmed, negative result
+
+`./scripts/retrain_vps.sh` run on the VPS. Full output pasted by mo;
+recorded verbatim below, not re-derived.
+
+### 1. Memory fix, confirmed at the scale that mattered
+
+| | value |
+|---|---|
+| dataset | 53,005,852 rows, `positions` |
+| old code, OOM kill #1 (e2-medium, 4 GB) | **2,276 MB** RSS at kill |
+| old code, OOM kill #2 (e2-standard-4, 16 GB) | 14.6 GB RSS at kill (2026-09-18 report) |
+| **new code, full rebuild** | **peak_rss_mb=56.5** |
+| reduction | **40.3×** (2,276 / 56.5) |
+| observations fetched (post-gate + gated) | 43,056,458 + 307,127 = 43,363,585 (81.8% of `positions`) |
+| wall time | 2,738.59 s (45.6 min), e2-medium |
+
+The per-vessel streaming fix (`PROGRESS.md` 2026-09-18, `ml/portcalls.py`
+`MmsiGrouper`, `ml/portcalls_job.py` server-side cursor) holds at the
+scale that actually OOM'd: 81.8% of all positions had to be read as
+candidate-vessel observations, and peak memory still stayed at 56.5 MB —
+consistent with the design bound (one vessel's fixes at a time, not
+total history) rather than a coincidence of this particular dataset.
+DESIGN.md §4.5's `TODO(mo)` (real 53M-row peak RSS) is answered: 56.5 MB.
+
+### 2. Why the first two OOM reruns still failed: stale image
+
+Both OOM kills mo reported on 2026-09-18 (2.3 GB, then 14.6 GB) happened
+**after** the streaming fix was already pushed (`adb71ed`). Cause:
+`docker compose run` reuses whatever image already exists for that
+service and does not rebuild on its own, even when the build context
+(source files) has changed since the image was last built. The VPS's
+`sawari-portcalls` image was still the pre-fix build from before
+`adb71ed`, so both reruns executed the old single-`conn.fetch()` code
+regardless of what was in the repo. A manual `docker compose build
+portcalls` on the VPS, then rerunning, is what let the fixed detector
+actually run — confirmed by the 56.5 MB result above.
+
+**Fixed in the script, not just this once**: every `docker compose run`
+in `scripts/retrain_vps.sh` (the `portcalls` rebuild, `ml.eval`,
+`ml.train`) now passes `--build`, so a stale image can't silently
+reintroduce this — each run rebuilds first if the source changed. The
+previously-separate `docker compose build -q ml` step before `ml.eval`
+is gone; `--build` on the run itself now covers it.
+
+### 3. Rebuild and dataset (steps 1–4)
+
+Positions span the full soak plus five more days of continued ingest —
+**2026-09-07 04:14:27 UTC → 2026-09-19 00:05:39 UTC** (~11.8 days), not
+just the 7-day window Part 1 measured disk/compression on. `ingest` was
+never restarted, so this is everything collected since deployment.
+
+```
+== step 1 ==
+count=53,005,852  min=2026-09-07 04:14:27.518183+00  max=2026-09-19 00:05:39.261212+00
+
+== step 2 (rebuild, same MAX_KMH=60 gate as always) ==
+since_minutes=17231
+window=17231m obs=43,056,458 gated=307,127 pairs=18,543 opened=30,442
+arrived=7,382 departed=20,199 open_total=10,243 stale_open=0 took=2738.59s
+peak_rss_mb=56.5
+
+== step 3 ==
+calls=30,442  arrivals=7,382 (24.2% of calls)  arrivals_with_observed_approach=5,863 (79.4% of arrivals)
+
+== step 4 ==
+dataset: rows=959,376 calls=5,863 gate=MAX_KMH 60 floor=1 kn holdout_frac=0.2
+temporal cutoff on arrival_at: 2026-09-16T15:19:56.548287+00:00
+```
+
+5,863 arrivals with an observed approach phase, versus 74 in the
+2026-09-06 single-day snapshot — a 79× increase, and comfortably clears
+the 30-call holdout floor (holdout below has 1,173 calls).
+
+### 4. `ml.train`: negative result — the model did not beat the baseline
+
+```
+train:   rows=722,158 calls=4,690 vessels=2,664
+holdout: rows=237,218 calls=1,173 vessels=962
+model: xgb.train {objective: reg:squarederror, eta: 0.3, max_depth: 6, seed: 0} num_boost_round=100
+NaN share, train: sog=0.1% cog=19.9% bearing_minus_cog=19.9% ship_type=0.0% length_m=0.9% width_m=1.0% draught_m=19.4%
+```
+
+| | rows | calls | MAE |
+|---|---|---|---|
+| train (in-sample, reference only) | 722,158 | 4,690 | **6.440 h** |
+| holdout — baseline | 237,218 | 1,173 | **65.277 h** |
+| holdout — XGBoost | 237,218 | 1,173 | **69.839 h** |
+| **improvement** | | | **−7.0%** (XGBoost is *worse*) |
+
+By distance band (rows n; baseline / XGBoost MAE, hours):
+
+| band | n | baseline | xgboost |
+|---|---|---|---|
+| 0–5 km | 115,127 | 64.020 | 66.521 |
+| 5–10 km | 85,544 | 72.916 | 78.298 |
+| 10–15 km | 36,547 | 51.352 | 60.489 |
+
+By port, holdout (rows n, calls; baseline / XGBoost MAE, hours):
+
+| port | n | calls | baseline | xgboost |
+|---|---|---|---|---|
+| Amsterdam | 103,734 | 246 | 71.559 | 75.675 |
+| Rotterdam | 46,467 | 280 | 55.631 | 65.123 |
+| Antwerp | 27,939 | 186 | 66.191 | 68.616 |
+| Hamburg | 20,643 | 54 | 44.948 | 39.941 |
+| Wilhelmshaven | 9,986 | 15 | 128.863 | 150.121 |
+| Bremerhaven | 9,780 | 35 | 101.397 | 92.861 |
+| Zeebrugge | 5,905 | 61 | 53.456 | 67.775 |
+| Le Havre | 4,184 | 70 | 10.415 | 11.240 |
+| Vlissingen | 3,720 | 50 | 2.650 | 5.418 |
+| Southampton | 3,517 | 128 | 10.672 | 15.129 |
+| Felixstowe | 1,200 | 45 | 0.307 | 2.930 |
+| Dunkirk | 143 | 3 | 97.837 | 125.401 |
+
+Feature importances (gain share, split count):
+
+| feature | gain | splits |
+|---|---|---|
+| sog | 22.4% | 358 |
+| draught_m | 14.4% | 906 |
+| length_m | 13.0% | 875 |
+| width_m | 12.9% | 446 |
+| minutes_in_anchorage | 9.7% | 995 |
+| cog | 7.8% | 362 |
+| bearing_minus_cog | 6.6% | 361 |
+| dist_m | 5.9% | 816 |
+| ship_type | 5.9% | 548 |
+| hour_utc | 1.4% | 335 |
+
+`model_registry` (on the VPS): `id=1 name=xgb_eta version=20260919T072427Z
+artifact=ml/artifacts/xgb_eta_20260919T072427Z.json`.
+
+**This does not meet the Definition of Done checkpoint** ("ETA model
+beats a stated naive baseline," `WORKING-AGREEMENT.md`) — as of this
+run, it loses to the baseline by 7.0% on the holdout. Recorded as a
+failed checkpoint, not reframed as a partial success.
+
+**Two hypotheses, both with evidence, neither confirmed here — no
+retraining, tuning, or feature changes were made to investigate either:**
+
+1. **Vessel-identity leakage.** In-sample MAE is 6.440 h; holdout MAE is
+   69.839 h — a 10.8× gap, i.e. the model reproduces its training calls
+   far better than it predicts new ones. The four static vessel
+   attributes (`ship_type`, `length_m`, `width_m`, `draught_m`) carry a
+   combined 46.2% of gain share. Together this is consistent with the
+   model partly keying off *which vessel this is* rather than
+   generalizable approach dynamics — the same concern the 2026-09-06
+   vessel-leakage diagnostics entry raised on a much smaller dataset
+   ("`length_m` and `width_m` are effectively vessel identifiers"). This
+   run used the plain temporal split, not `group` — whether train/holdout
+   vessel overlap is actually driving the gap is untested here;
+   `ml.train --diagnostics` (existing, unused this run) is the tool that
+   would check it, on a future run.
+2. **Target dominated by anchorage wait time, not transit.** The
+   *baseline* — a distance/speed formula with no learning — already has
+   a 65.277 h holdout MAE, and 74.6% of holdout rows are "floored"
+   (`sog < 1 kn`, i.e. the vessel is essentially stationary). Most of the
+   labelled "approach" data is a vessel already parked in the anchorage
+   waiting — sometimes for days — not one steaming toward the port on a
+   speed/distance trajectory either predictor is built to read.
+   `minutes_in_anchorage` being the 5th-highest-gain feature (9.7%) is
+   consistent with the model partially substituting elapsed dwell time
+   for the missing wait-time signal, which neither `dist_m` nor `sog`
+   carry.
+
+Both are hypotheses the data is consistent with, not conclusions the
+data proves; distinguishing them (or ruling either out) is future work,
+not done in this run.
+
+### 5. Known issue: `ml.dataset`'s query is slow at this scale (not fixed)
+
+`ml.eval` (step 4) took **over 90 minutes** to build the dataset on the
+VPS, reading **77.6 GB** from a database whose total size is measured at
+~9 GB (Part 1, 2026-09-18: 9,015 MB) — 8.6× the database's own size in
+I/O for one query, which points at a nested-loop plan somewhere in
+`DATASET`'s `fixes` CTE (`ml/dataset.py:41-71`) rather than a
+sequential/index scan. Recorded as a known issue with these two measured
+numbers; **not investigated or fixed here** — out of scope for this run
+per instruction, and the checked-but-not-changed conclusion in the
+2026-09-19 OOM entry above (`ml/dataset.py`'s Python-side memory is
+bounded and fine) is about client memory, not query plan or I/O
+efficiency, so it doesn't cover this.
+
+### 6. `model_registry` id=1 twice — separate databases, not a collision
+
+Local (WSL2) `model_registry` has its own `id=1` — the 2026-09-06
+pipeline-validation run (`xgb_eta` `20260906T074941Z`). This run's VPS
+`model_registry` also has `id=1` (`xgb_eta` `20260919T072427Z`). Both
+are correct: `docker-compose.yml`'s `pgdata` is a named Docker volume
+with no host bind, so the VPS and this WSL2 machine have always had
+physically separate Postgres data directories — confirmed locally,
+`docker volume ls` shows `local sawari_pgdata` on this machine only. The
+VPS's `model_registry` had never had a row before this run, so its
+`SERIAL` sequence correctly started at 1. No overwrite happened; the two
+`id=1` rows live in two different databases and neither is reachable
+from the other.
+
+`ingest` was not touched at any point in this run or its investigation.
 
 ## Constraints discovered
 

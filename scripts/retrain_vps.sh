@@ -18,6 +18,12 @@
 # every candidate vessel's history at once, so this run also reports the
 # real peak RSS on that dataset — the number DESIGN.md S4.5's TODO(mo)
 # is waiting on.
+#
+# Every `docker compose run` below passes --build: the first two OOM
+# reruns on the VPS burned through the memory fix silently, because
+# `docker compose run` reuses whatever image already exists and never
+# rebuilds on its own — those two runs were executing the stale,
+# pre-fix portcalls image. PROGRESS.md 2026-09-19.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -32,7 +38,7 @@ SINCE_MIN=$(docker compose exec -T db psql -U sawari -d sawari -tAc \
   "SELECT ceil(EXTRACT(EPOCH FROM (now() - min(time)))/60)::int FROM positions;" | tr -d '[:space:]')
 echo "since_minutes=$SINCE_MIN"
 docker compose exec -T db psql -U sawari -d sawari -c "TRUNCATE port_calls;"
-docker compose run --rm -T portcalls python -c "
+docker compose run --rm --build -T portcalls python -c "
 import resource, subprocess, sys
 p = subprocess.run(['python', '-m', 'ml.portcalls_job', '--once', '--since-minutes', '$SINCE_MIN'])
 print(f'peak_rss_mb={resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024:.1f}')
@@ -50,10 +56,9 @@ FROM port_calls;"
 
 echo
 echo "== step 4: baseline eval, temporal holdout (default holdout_frac=0.2) =="
-docker compose build -q ml
 EVAL_OUT="$(mktemp)"
 trap 'rm -f "$EVAL_OUT"' EXIT
-docker compose run --rm -T ml python -m ml.eval | tee "$EVAL_OUT"
+docker compose run --rm --build -T ml python -m ml.eval | tee "$EVAL_OUT"
 
 HOLDOUT_CALLS="$(grep -m1 '== holdout (arrival_at >= cutoff)' "$EVAL_OUT" | grep -oP 'calls=\K[0-9]+' || true)"
 if [ -z "$HOLDOUT_CALLS" ]; then
@@ -71,4 +76,4 @@ fi
 
 echo
 echo "== step 5: XGBoost, defaults, writes model_registry =="
-docker compose run --rm -T ml python -m ml.train
+docker compose run --rm --build -T ml python -m ml.train
