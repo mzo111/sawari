@@ -74,5 +74,19 @@ services:
       db:
         condition: service_healthy
 
+  # Not a long-running service — no `restart:` policy. Built for one-off
+  # `docker compose run --rm ml python -m ml.eval` / `ml.train`
+  # (scripts/retrain_vps.sh), where requirements-ml.txt (xgboost-cpu) is
+  # needed and requirements.txt (the other services' image) isn't enough.
+  ml:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.ml
+    environment:
+      DATABASE_URL: postgresql://sawari:${POSTGRES_PASSWORD:-sawari}@db:5432/sawari
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:

@@ -803,6 +803,93 @@ settles at **~16.6 GB** — comfortably inside the 26.4 GB currently free on
 the 48 GB disk (45% used today, at 7 days of data with no compressed chunks
 yet).
 
+## 2026-09-18 — retrain on the full soak: plan and pre-registered cutoff
+
+This session has no VPS access (no SSH host, no reachable `DATABASE_URL` —
+the local WSL2 compose stack's `positions` table stops at 2026-09-07
+04:16, before the soak window even starts; confirmed with `docker compose
+exec -T db psql -c "SELECT count(*), min(time), max(time) FROM
+positions;"` → 805,340 rows, max 2026-09-07 04:16:32). Mo will run the
+commands below on the VPS and paste the output back for write-up. This
+entry is the plan, written **before any rebuild or eval output exists**,
+per the instruction not to pick the cutoff after seeing results.
+
+### Rebuild scope
+
+`ml.portcalls_job` only takes a `since` bound (`datetime.now() -
+since_minutes`), not an end bound (`ml/portcalls_job.py:100-102`), so
+"rebuild over the full soak" means: truncate `port_calls`, then replay
+every `positions` row currently on the VPS from its earliest row through
+whatever "now" is at run time. That is a superset of the exact
+2026-09-07 04:14 → 09-14 04:14 window used for the Part 1 disk/compression
+numbers above — ingestion has not been restarted since, so it should have
+kept collecting through today (2026-09-18); the replay will pick up
+whatever is actually there. No new dependency, no schema change, no
+change to the plausibility gate (`MAX_KMH = 60`, `ml/portcalls.py:59-68`,
+unchanged).
+
+### Split method and holdout fraction — decided now, before results
+
+Same as every prior run: **`temporal_split`, split by call on
+`arrival_at`, never random** (`ml/baseline.py:40-55`,
+`WORKING-AGREEMENT.md` definition of done). `holdout_frac = 0.2` (the
+default in `ml.eval` and `ml.train`) stays unchanged — no tuning, and
+changing it now, after already knowing the previous run's 74-call dataset
+was too thin, would be picking the split to guarantee a result rather
+than committing to a method. Reasoning for not raising it defensively:
+the prior single-day snapshot found 74 of 788 arrivals had an observed
+approach phase (9.4%); a 7-to-11-day soak has no reason to have a
+structurally different observed-approach rate, so scaling the call count
+by roughly the number of days of data (7-11x) puts the expected dataset
+in the several-hundred-calls range, and 20% of several hundred clears the
+30-call holdout floor with room. If it doesn't clear 30 holdout calls,
+the eval step below reports that and this run stops before `ml.train`.
+
+### Running it: `scripts/retrain_vps.sh`
+
+The VPS has no `.venv` (only the four service images), so `ml.eval` and
+`ml.train` can't run as bare `python -m ...` there the way every prior
+entry in this file did locally. New compose service **`ml`**
+(`docker-compose.yml`, `ops/Dockerfile.ml`) builds from
+`requirements-ml.txt` (adds `xgboost-cpu` on top of what `portcalls`
+already has) and exists only for `docker compose run --rm ml ...` — no
+`restart:` policy, not started by `docker compose up`.
+`scripts/retrain_vps.sh` runs the five steps in order: positions sanity
+check, `TRUNCATE port_calls` + full-history replay through
+`ml.portcalls_job`, the calls/arrivals/observed-approach report, `ml.eval`
+inside the `ml` container, then — only if the printed holdout call count
+is ≥ 30 — `ml.train` inside the same container. It never touches
+`ingest`. Usage: `./scripts/retrain_vps.sh` from the repo root on the VPS.
+
+**Confirmed locally** (WSL2 compose stack, not the VPS — its `positions`
+table is the pre-soak 805,340-row snapshot, `min` 2026-09-06 05:11:59,
+`max` 2026-09-07 04:16:32):
+
+```
+.venv/bin/python -m ruff check .     # All checks passed!
+.venv/bin/python -m pytest -q        # 90 passed
+docker compose build -q ml           # builds clean, requirements-ml.txt resolves
+./scripts/retrain_vps.sh
+```
+
+The `ml` service correctly reached `db` over the compose network
+(`DATABASE_URL=...@db:5432/...`, same as `portcalls`/`api`) and printed a
+real `ml.eval` report. On this local (disposable, non-soak) dataset the
+holdout came out to 21 calls — which correctly exercised the **stop path**:
+the script printed "Holdout has 21 calls, fewer than 30 — stopping before
+ml.train." and exited 1 without running step 5. That's the same guard that
+will fire on the VPS if the full-soak holdout is still too thin — this run
+proves the guard actually works, not just that it reads right.
+
+### Superseded by this run, once it lands
+
+- `model_registry` id=1 (`xgb_eta` `20260906T074941Z`): train_calls=64,
+  holdout_calls=17, baseline 0.8145 h, model 0.3936 h — single-day
+  dataset, pipeline-validation only.
+- The 2026-09-06 baseline entry's train-reference side (`arrival_at <
+  cutoff`: 1,923 rows, **59 calls**) and its holdout side (74 calls
+  total, 15 in holdout) — same single-day dataset.
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second
