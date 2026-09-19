@@ -735,6 +735,74 @@ across an api restart, click → track + drawer, frames/s vs applied/s in
 the Connection panel — are open until someone opens
 `http://localhost:8000/`.
 
+## 2026-09-18 — 7-day soak: hourly coverage, compression, disk
+
+Measured directly on the VPS. Soak window **2026-09-07 04:14 UTC →
+2026-09-14 04:14 UTC** — 24×7 + 1 = 169 distinct `date_trunc('hour', time)`
+buckets touch this window (the 04:00 bucket appears once at each end,
+partially filled: 46 min on the first day, 14 min on the last).
+
+```
+# on the VPS
+docker compose exec -T db psql -U sawari -d sawari -c "
+SELECT date_trunc('hour', time) AS hr, count(*) FROM positions
+WHERE time >= '2026-09-07 04:14:00+00' AND time < '2026-09-14 04:14:00+00'
+GROUP BY 1 ORDER BY 1;"
+docker compose exec -T db psql -U sawari -d sawari -c \
+  "SELECT count(*) FROM positions WHERE time >= '2026-09-07 04:14:00+00' AND time < '2026-09-14 04:14:00+00';"
+```
+
+| | value |
+|---|---|
+| hours present | 169 of 169 |
+| rows, soak window | 33,193,133 |
+| lowest full hour | 160,683 rows @ 2026-09-13 13:00 UTC |
+| partial end hour | 45,183 rows @ 2026-09-14 04:00 UTC (window ends 04:14) |
+
+The low hours cluster 09:00–17:00 UTC on 2026-09-12/13 (a Sat/Sun) — a
+smooth dip across the whole afternoon, not a step-change drop, consistent
+with less shipping traffic on a weekend rather than a coverage gap.
+169/169 hours present means **zero hour-long gaps** over the full week —
+the strongest uptime evidence so far, stronger than any single heartbeat
+line.
+
+### Compression
+
+```
+docker compose exec -T db psql -U sawari -d sawari -x -c \
+  "SELECT * FROM hypertable_compression_stats('positions');"
+```
+
+| | before | after | ratio |
+|---|---|---|---|
+| `positions`, compressed chunks only | 3,227 MB | 341 MB | **9.5×** |
+
+Covers compressed chunks only (`compress_after = 7 days`, `db/schema.sql:54`)
+— the hot 7-day chunk is excluded by definition, matching the ratio's own
+scope.
+
+### Disk
+
+```
+df -h /            # 45% of 48 GB
+docker compose exec -T db psql -U sawari -d sawari -c \
+  "SELECT pg_size_pretty(pg_database_size('sawari'));"   # 9,015 MB
+```
+
+45% of 48 GB used; database is 9,015 MB of that — the remainder is the OS,
+Docker images/layers, and anything else on the volume.
+
+### Retention arithmetic (fresh rate, measured ratio)
+
+Proposed answer written to the retention `TODO(mo)` in `DESIGN.md` §1, for
+review — see that entry for the full arithmetic. Summary: rate from this
+soak is 33,193,133 rows / 7 days = 4,741,876 rows/day. At the DESIGN.md:76
+constant of 222 B/row uncompressed (hot, 7-day window) and the measured
+9.5× ratio applied to the cold window (days 8–90), steady-state `positions`
+settles at **~16.6 GB** — comfortably inside the 26.4 GB currently free on
+the 48 GB disk (45% used today, at 7 days of data with no compressed chunks
+yet).
+
 ## Constraints discovered
 
 - **AISStream allows one live websocket connection per API key.** A second

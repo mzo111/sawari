@@ -126,6 +126,50 @@ and the hot window, in that order.
 > specifically broke or hurt? No v1 checkout exists on this machine, so this
 > is memory only.
 
+> TODO(mo): Does 90-day retention actually fit on the CX22's disk now that
+> compression is measured? Confirm or revise the proposed answer below —
+> it's a projection from one week of data, not something run for 90 days.
+>
+> **Proposed answer (for mo's review, not yet confirmed):** Yes, with
+> margin. Facts, measured on the VPS 2026-09-18 (`PROGRESS.md` same date):
+>
+> - Soak rate: 33,193,133 rows over the exact 7-day window 2026-09-07
+>   04:14 UTC → 2026-09-14 04:14 UTC = **4,741,876 rows/day**.
+> - Compression, measured on compressed chunks only, from
+>   `hypertable_compression_stats('positions')`: 3,227 MB → 341 MB =
+>   **9.5×**.
+> - Reusing the 222 B/row constant from this section (`DESIGN.md:76`,
+>   uncompressed, indexes included) for the hot window, and applying the
+>   measured 9.5× directly to the cold window's uncompressed projection
+>   (rather than re-deriving bytes/row, since 9.5× is an observed ratio on
+>   real chunks, not an estimate):
+>
+>   ```
+>   hot (7 d, uncompressed):  7  × 4,741,876 × 222 B  =  7.37 GB
+>   cold (days 8-90, raw):   83  × 4,741,876 × 222 B  = 87.37 GB
+>   cold (days 8-90, ÷9.5×): 87.37 GB / 9.5           =  9.20 GB
+>   steady-state positions:   7.37 + 9.20             ≈ 16.6 GB
+>   ```
+>
+> - Disk today: 45% of 48 GB used (21.6 GB), of which the whole database
+>   is 9,015 MB (8.8 GB) — after just 7 days, none of it compressed yet
+>   (nothing has crossed the 7-day compression threshold by more than a
+>   few hours). Free today: 26.4 GB.
+> - Cross-check: today's whole-database size ÷ soak-window row count is
+>   9,015 MB / 33,193,133 rows ≈ 285 B/row — same order as the 222 B/row
+>   constant (higher because it's whole-DB including `vessels`,
+>   `port_calls`, and any rows from before the soak window, not
+>   `positions` alone).
+>
+> At ~16.6 GB steady-state for `positions` against 48 GB total (26.4 GB
+> free today, before any compression has actually run past day 7), 90-day
+> retention fits with several times the disk to spare. What this doesn't
+> cover: `vessels` and `port_calls` growth over 90 days (both un-retained,
+> both small so far — `port_calls` was 3,032 rows after one day locally),
+> WAL/temp file headroom during the compression job itself, and whether
+> row size or vessel density stays flat over a full quarter rather than
+> one September week.
+
 ---
 
 ## 2. Ingest batching
